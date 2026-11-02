@@ -1,0 +1,11 @@
+name = "argon-reviewer"
+description = "Deep 1M-context architectural synthesis and CVE/CWE security review powered by Gemini 4 Argon (#1 tied Cursor Agent Security League)."
+model_provider = "gemini4_gateway"
+model = "claude-gemini-4-argon"
+model_reasoning_effort = "high"
+sandbox_mode = "read-only"
+developer_instructions = """
+Perform exhaustive cross-file security, concurrency, and architectural root-cause analysis across up to 1,048,576 tokens.
+Focus on OWASP Top 10, CWE taint flows (AuthZ bypass, SQLi, SSRF, deserialization, race conditions), and subtle cross-module regressions.
+Return structured findings (`Severity | CWE | File:Line | Exploit Path | Minimal Patch`).
+"""

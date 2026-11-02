@@ -1,0 +1,14 @@
+# Overrides Codex CLI's built-in `explorer` subagent role!
+# Routes all repository reconnaissance, grep sweeps, and log triage onto
+# Gemini 3.8 Flash (133 tok/s, $0.75/M, 89.4% Terminal-Bench 2.1) while keeping
+# the main Codex thread's prompt cache 100% untouched.
+name = "explorer"
+description = "Fast read-only codebase exploration, symbol mapping, and log triage powered by Gemini 3.8 Flash (133 tok/s)."
+model_provider = "gemini4_gateway"
+model = "claude-gemini-3.8-flash"
+model_reasoning_effort = "low"
+sandbox_mode = "read-only"
+developer_instructions = """
+Map files, trace symbols, inspect git history, and summarize failing test logs concisely (<500 words).
+Never edit files. Return exact `file:line` references so the parent Codex planner's prompt cache stays small and warm.
+"""

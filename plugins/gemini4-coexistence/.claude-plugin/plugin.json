@@ -1,0 +1,63 @@
+{
+  "name": "gemini4-coexistence",
+  "version": "1.1.0",
+  "description": "Cache-preserving Gemini 4 Argon, Gemini 3.8 Flash, Gemini 3.5 Flash-Lite, Fairwind Carbon-ready, and Google Antigravity coexistence plugin for Claude Code.",
+  "author": {
+    "name": "Vikas Mishra"
+  },
+  "license": "Apache-2.0",
+  "keywords": [
+    "gemini-4-argon",
+    "gemini-3.8-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-4-carbon",
+    "antigravity",
+    "prompt-caching"
+  ],
+  "mcpServers": "./.mcp.json",
+  "userConfig": {
+    "gemini_api_key": {
+      "type": "string",
+      "title": "Gemini API Key (AI Studio)",
+      "description": "Paid Google AI Studio API key (leave empty if using Vertex AI ADC or Google AI Pro/Ultra `agy` CLI).",
+      "sensitive": true,
+      "default": ""
+    },
+    "use_vertex": {
+      "type": "boolean",
+      "title": "Use Vertex AI (GCP Enterprise)",
+      "description": "Route requests through Google Cloud Vertex AI Application Default Credentials instead of AI Studio.",
+      "default": false
+    },
+    "gcp_project": {
+      "type": "string",
+      "title": "Google Cloud Project ID",
+      "description": "GCP Project ID when Vertex AI mode is enabled.",
+      "default": ""
+    },
+    "primary_model": {
+      "type": "string",
+      "title": "Frontier Reasoning & Security Model (GA)",
+      "description": "Default GA Gemini 4 frontier model (`gemini-4-argon`, $2/$10/$0.10 intro through Nov 30, 2026).",
+      "default": "gemini-4-argon"
+    },
+    "subagent_model": {
+      "type": "string",
+      "title": "Sub-Agent & Exploration Workhorse (GA)",
+      "description": "Default high-speed agentic workhorse (`gemini-3.8-flash`, 133 tok/s, $0.75/$3.75/$0.075 to Dec 31, 2026).",
+      "default": "gemini-3.8-flash"
+    },
+    "background_model": {
+      "type": "string",
+      "title": "Background Indexing & Safeguards Model (GA)",
+      "description": "Ultra-fast 454 tok/s utility model (`gemini-3.5-flash-lite`, $0.30/$2.50).",
+      "default": "gemini-3.5-flash-lite"
+    },
+    "fairwind_carbon_model": {
+      "type": "string",
+      "title": "Gemini 4 Carbon Endpoint (Fairwind Early Access / GA)",
+      "description": "Optional override for Google Cloud Fairwind cyber-defense customers or once Gemini 4 Carbon enters public GA.",
+      "default": ""
+    }
+  }
+}

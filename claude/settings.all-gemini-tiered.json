@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:3456",
+    "ANTHROPIC_AUTH_TOKEN": "sk-gemini4-local-gateway",
+    "ANTHROPIC_API_KEY": "",
+    "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "800000",
+    "ENABLE_TOOL_SEARCH": "false",
+    "ANTHROPIC_MODEL": "claude-gemini-4-argon[1m]",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-gemini-4-argon[1m]",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-gemini-3.8-flash[1m]",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-gemini-3.5-flash-lite",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "claude-gemini-3.8-flash[1m]"
+  }
+}

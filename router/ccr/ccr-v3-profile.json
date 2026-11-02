@@ -1,0 +1,44 @@
+{
+  "$schema": "https://raw.githubusercontent.com/musistudio/claude-code-router/main/schema.json",
+  "profile": "gemini4-coexistence-v3-nov2026",
+  "port": 3456,
+  "host": "127.0.0.1",
+  "API_TIMEOUT_MS": 1200000,
+  "providers": [
+    {
+      "name": "anthropic",
+      "type": "anthropic",
+      "api_base_url": "https://api.anthropic.com/v1/messages",
+      "api_key": "${ANTHROPIC_UPSTREAM_KEY}",
+      "models": ["claude-opus-5-5", "claude-sonnet-5-5"]
+    },
+    {
+      "name": "gemini",
+      "type": "gemini",
+      "api_base_url": "https://generativelanguage.googleapis.com/v1beta/models/",
+      "api_key": "${GEMINI_API_KEY}",
+      "models": [
+        "gemini-4-argon",
+        "gemini-3.8-flash",
+        "gemini-3.5-flash-lite"
+      ],
+      "transformer": {
+        "use": ["gemini"],
+        "gemini-4-argon": {
+          "maxOutputTokens": 65536,
+          "thinkingLevel": "HIGH",
+          "dropParams": ["temperature", "top_p", "top_k", "cachedContent"]
+        }
+      }
+    }
+  ],
+  "Router": {
+    "default": "anthropic,claude-opus-5-5",
+    "background": "gemini,gemini-3.5-flash-lite",
+    "subagent": "gemini,gemini-3.8-flash",
+    "think": "gemini,gemini-4-argon",
+    "longContext": "gemini,gemini-4-argon",
+    "longContextThreshold": 150000,
+    "customRouter": "./gemini4-cache-aware-router.js"
+  }
+}

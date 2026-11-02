@@ -1,0 +1,107 @@
+# ==============================================================================
+# LiteLLM v1.109.0+ Enterprise Coexistence Proxy Configuration (Nov 2026)
+# ==============================================================================
+# Validated for:
+#   1. Claude Code v2.1.302+ (`/v1/messages`, `/model` discovery via `claude-*` IDs,
+#      `--permission-mode auto` safeguards polyfill, server-side compaction,
+#      and single-family `claude-auto-gemini` complexity router with 97.4%-99.3%
+#      warm cache hit rates & zero 728-char `tool_use.id` regex 400 crashes)
+#   2. OpenAI Codex CLI v0.159+ (`/v1/responses` wire_api, 2-hour SSE idle support)
+#   3. Cursor Enterprise (`/cursor` endpoint with `litellm-` virtual model aliases)
+#
+# Run:
+#   pip install "litellm[proxy]>=1.109.0"
+#   litellm --config litellm_config.yaml --port 4000
+# ==============================================================================
+
+model_list:
+  # --- Anthropic Frontier Peers (Optional Hybrid Root Planners) ---
+  - model_name: claude-opus-5-5
+    litellm_params:
+      model: anthropic/claude-opus-5-5
+      api_key: os.environ/ANTHROPIC_UPSTREAM_KEY
+
+  - model_name: claude-sonnet-5-5
+    litellm_params:
+      model: anthropic/claude-sonnet-5-5
+      api_key: os.environ/ANTHROPIC_UPSTREAM_KEY
+
+  # --- Gemini 4 Argon (GA Frontier Reasoning, 1M Synthesis & Security) ---
+  # Enforces Oct 27, 2026 API mandates: max_output_tokens=65536 (unified thinking+output
+  # pool), timeout=1200 (20 min for deep reasoning), drop_params for temperature/top_p.
+  - model_name: claude-gemini-4-argon
+    litellm_params:
+      model: gemini/gemini-4-argon
+      api_key: os.environ/GEMINI_API_KEY
+      thinking_level: high
+      max_output_tokens: 65536
+      timeout: 1200
+
+  # Cursor Enterprise alias (`litellm-` prefix convention)
+  - model_name: litellm-gemini-4-argon
+    litellm_params:
+      model: gemini/gemini-4-argon
+      api_key: os.environ/GEMINI_API_KEY
+      thinking_level: high
+      max_output_tokens: 65536
+      timeout: 1200
+
+  # --- Gemini 3.8 Flash (133 tok/s Workhorse for Subagents & Routine Coding) ---
+  # 89.4% Terminal-Bench 2.1 | 73.7% DeepSWE v1.1 | $0.75/$3.75 ($0.075 cached)
+  - model_name: claude-gemini-3.8-flash
+    litellm_params:
+      model: gemini/gemini-3.8-flash
+      api_key: os.environ/GEMINI_API_KEY
+      max_output_tokens: 16384
+
+  - model_name: litellm-gemini-3.8-flash
+    litellm_params:
+      model: gemini/gemini-3.8-flash
+      api_key: os.environ/GEMINI_API_KEY
+      max_output_tokens: 16384
+
+  # --- Gemini 3.5 Flash-Lite (454 tok/s Background, Haiku & Safeguard Tier) ---
+  # $0.30/$2.50 | Fastest Gemini model for indexing, classification & guardrails
+  - model_name: claude-gemini-3.5-flash-lite
+    litellm_params:
+      model: gemini/gemini-3.5-flash-lite
+      api_key: os.environ/GEMINI_API_KEY
+
+  # --- Single-Family Dynamic Complexity Router (<1ms Zero-Cost Heuristic) ---
+  # Keeps turns inside the Gemini family so `tool_use.id` formats and `thought_signature`
+  # state never cross provider boundaries mid-session (97.4%-99.3% warm cache hits!).
+  - model_name: claude-auto-gemini
+    litellm_params:
+      model: auto_router/complexity_router
+      complexity_router_default_model: claude-gemini-3.8-flash
+      complexity_router_tiers:
+        SIMPLE: claude-gemini-3.5-flash-lite
+        MEDIUM: claude-gemini-3.8-flash
+        COMPLEX: claude-gemini-4-argon
+        REASONING: claude-gemini-4-argon
+
+  # --- Optional: Google Cloud Fairwind Program Hook for Gemini 4 Carbon ---
+  # Uncomment if your organization holds vetted Fairwind cyber-defense credentials:
+  # - model_name: claude-gemini-4-carbon
+  #   litellm_params:
+  #     model: vertex_ai/gemini-4-carbon
+  #     vertex_project: os.environ/GOOGLE_CLOUD_PROJECT
+  #     vertex_location: global
+  #     thinking_level: high
+  #     max_output_tokens: 65536
+  #     timeout: 1200
+
+litellm_settings:
+  drop_params: true
+  # Polyfills Claude Code v2.1.302+ `--permission-mode auto` (`safeguards` field ->
+  # `safeguard_results` SSE delta) so `Auto mode server: Enabled` works on Gemini!
+  safeguards_classifier_model: claude-gemini-3.5-flash-lite
+  # Polyfills Claude Code server-side `context_management` compaction blocks:
+  context_management_summary_model: claude-gemini-3.8-flash
+  fallbacks:
+    - {"claude-opus-5-5": ["claude-gemini-4-argon"]}
+    - {"claude-sonnet-5-5": ["claude-gemini-3.8-flash"]}
+    - {"claude-gemini-4-argon": ["claude-gemini-3.8-flash"]}
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

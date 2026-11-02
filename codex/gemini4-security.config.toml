@@ -1,0 +1,31 @@
+# ==============================================================================
+# OpenAI Codex CLI — Dedicated Security & CVE Audit Profile (`~/.codex/gemini4-security.config.toml`)
+# ==============================================================================
+# Launch in one command (Codex v0.134+ / v0.159+ profile overlay):
+#   codex exec --profile gemini4-security "Audit auth/ and api/ for CWEs"
+
+model_provider = "gemini4_gateway"
+model = "claude-gemini-4-argon"
+model_reasoning_effort = "high"
+model_context_window = 1048576
+model_auto_compact_token_limit = 850000
+sandbox_mode = "read-only"
+
+[agents]
+max_threads = 4
+max_depth = 1
+default_subagent_model = "claude-gemini-3.8-flash"
+
+[model_providers.gemini4_gateway]
+name = "Gemini 4 Security Gateway (Responses API)"
+base_url = "http://127.0.0.1:3456/v1"
+wire_api = "responses"
+stream_idle_timeout_ms = 7200000
+stream_max_retries = 5
+request_max_retries = 4
+api_key_model_discovery = true
+
+[mcp_servers.gemini4]
+command = "python3"
+args = ["__GEMINI4_MCP_SERVER_PATH__"]
+tool_timeout_sec = 1200

@@ -1,0 +1,14 @@
+{
+  "name": "gemini4-harness-kit",
+  "description": "Gemini 4 Multi-Harness Coexistence Marketplace: Cache-preserving Gemini 4 Argon, Gemini 3.8 Flash, Gemini 3.5 Flash-Lite, and Antigravity integration for Claude Code.",
+  "owner": {
+    "name": "Vikas Mishra"
+  },
+  "plugins": [
+    {
+      "name": "gemini4-coexistence",
+      "source": "./plugins/gemini4-coexistence",
+      "description": "Cache-preserving Gemini 4 Argon, Gemini 3.8 Flash (133 tok/s), Gemini 3.5 Flash-Lite (454 tok/s), and Antigravity (`ask_antigravity`) subagents, forked skills, and file-pointer MCP server."
+    }
+  ]
+}
