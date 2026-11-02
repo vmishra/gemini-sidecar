@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 292" width="1120" height="292" role="img" aria-labelledby="hero-title hero-desc">
+  <title id="hero-title">gemini4-harness-kit — In-Harness Gemini 4 Coexistence &amp; Cache-Safe Routing</title>
+  <desc id="hero-desc">Keep Claude Code, OpenAI Codex CLI, and Cursor IDE. Pin the root prompt cache and offload subagents, 1M disk reads, and background loops to Gemini 4 Argon, 3.8 Flash, and 3.5 Flash-Lite.</desc>
+  <defs>
+    <clipPath id="card-clip">
+      <rect x="4" y="4" width="1112" height="284" rx="16"/>
+    </clipPath>
+  </defs>
+
+  <!-- Outer Card Surface (works cleanly on both GitHub Light & Dark themes) -->
+  <rect x="4" y="4" width="1112" height="284" rx="16" fill="#FFFFFF" stroke="#DADCE0" stroke-width="1.5"/>
+
+  <!-- Signature 4-Color Google Top Bar -->
+  <g clip-path="url(#card-clip)">
+    <rect x="4" y="4" width="278" height="7" fill="#4285F4"/>
+    <rect x="282" y="4" width="278" height="7" fill="#EA4335"/>
+    <rect x="560" y="4" width="278" height="7" fill="#FBBC04"/>
+    <rect x="838" y="4" width="278" height="7" fill="#34A853"/>
+  </g>
+
+  <!-- Left Column: Brand & Value Proposition -->
+  <g transform="translate(42, 44)">
+    <!-- 4-Dot Geometric Badge -->
+    <rect x="0" y="0" width="198" height="28" rx="14" fill="#F8F9FA" stroke="#DADCE0" stroke-width="1"/>
+    <circle cx="16" cy="14" r="4.5" fill="#4285F4"/>
+    <circle cx="29" cy="14" r="4.5" fill="#EA4335"/>
+    <circle cx="42" cy="14" r="4.5" fill="#FBBC04"/>
+    <circle cx="55" cy="14" r="4.5" fill="#34A853"/>
+    <text x="69" y="18" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#202124" letter-spacing="0.3">IN-HARNESS COEXISTENCE</text>
+
+    <!-- Repo Title -->
+    <text x="0" y="72" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="34" font-weight="800" fill="#202124" letter-spacing="-0.6">gemini4-harness-kit</text>
+
+    <!-- Crisp Subtitle -->
+    <text x="0" y="106" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="15.5" font-weight="500" fill="#5F6368">Run Gemini 4 Argon, 3.8 Flash &amp; 3.5 Flash-Lite inside the coding tools you already use.</text>
+    <text x="0" y="129" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="15.5" font-weight="500" fill="#5F6368">Zero mid-thread cache thrash. Zero cross-provider tool-ID 400 crashes. Zero pip packages.</text>
+
+    <!-- Supported Harness Pills -->
+    <g transform="translate(0, 158)" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" font-weight="600">
+      <rect x="0" y="0" width="144" height="30" rx="7" fill="#E8F0FE" stroke="#AECBFA"/>
+      <text x="72" y="19" text-anchor="middle" fill="#174EA6">Claude Code v2.1+</text>
+
+      <rect x="154" y="0" width="154" height="30" rx="7" fill="#E6F4EA" stroke="#CEEAD6"/>
+      <text x="231" y="19" text-anchor="middle" fill="#0D652D">Codex CLI v0.159+</text>
+
+      <rect x="318" y="0" width="106" height="30" rx="7" fill="#FEF7E0" stroke="#FDE293"/>
+      <text x="371" y="19" text-anchor="middle" fill="#5F370E">Cursor IDE</text>
+
+      <rect x="434" y="0" width="132" height="30" rx="7" fill="#FCE8E6" stroke="#FAD2CF"/>
+      <text x="500" y="19" text-anchor="middle" fill="#A50E0E">LiteLLM &amp; CCR</text>
+    </g>
+  </g>
+
+  <!-- Right Column: 2x2 Key Proof-Point Cards -->
+  <g transform="translate(656, 38)">
+    <!-- Card 1: Session Savings -->
+    <rect x="0" y="0" width="204" height="98" rx="10" fill="#F8F9FA" stroke="#DADCE0"/>
+    <rect x="0" y="0" width="204" height="4" rx="2" fill="#34A853"/>
+    <text x="16" y="38" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="25" font-weight="800" fill="#137333">-60% to -75%</text>
+    <text x="16" y="60" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="12" font-weight="600" fill="#202124">40-Turn Session Spend</text>
+    <text x="16" y="78" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5F6368">$7.97 -&gt; $3.17 / $1.98</text>
+
+    <!-- Card 2: Subagent Speed -->
+    <rect x="218" y="0" width="204" height="98" rx="10" fill="#F8F9FA" stroke="#DADCE0"/>
+    <rect x="218" y="0" width="204" height="4" rx="2" fill="#4285F4"/>
+    <text x="234" y="38" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="25" font-weight="800" fill="#1A73E8">133 tok/s</text>
+    <text x="234" y="60" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="12" font-weight="600" fill="#202124">Gemini 3.8 Flash GA</text>
+    <text x="234" y="78" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5F6368">89.4% Terminal-Bench 2.1</text>
+
+    <!-- Card 3: Implicit Cache -->
+    <rect x="0" y="114" width="204" height="98" rx="10" fill="#F8F9FA" stroke="#DADCE0"/>
+    <rect x="0" y="114" width="204" height="4" rx="2" fill="#FBBC04"/>
+    <text x="16" y="152" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="25" font-weight="800" fill="#B06000">$0.10 / 1M</text>
+    <text x="16" y="174" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="12" font-weight="600" fill="#202124">1M Argon Implicit Cache</text>
+    <text x="16" y="192" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5F6368">95% off · $0 write fee</text>
+
+    <!-- Card 4: Zero Dependencies -->
+    <rect x="218" y="114" width="204" height="98" rx="10" fill="#F8F9FA" stroke="#DADCE0"/>
+    <rect x="218" y="114" width="204" height="4" rx="2" fill="#EA4335"/>
+    <text x="234" y="152" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="25" font-weight="800" fill="#C5221F">Zero Deps</text>
+    <text x="234" y="174" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="12" font-weight="600" fill="#202124">Python 3.9–3.13+ Stdlib</text>
+    <text x="234" y="192" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" fill="#5F6368">7/7 Hermetic Test Suites</text>
+  </g>
+</svg>

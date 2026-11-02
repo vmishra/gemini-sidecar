@@ -1,0 +1,46 @@
+name: Verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  hermetic-suites:
+    name: Hermetic Suites (${{ matrix.os }} · Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: "3.9"
+          - os: ubuntu-latest
+            python: "3.13"
+          - os: macos-latest
+            python: "3.13"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Set up Node.js (for CCR router suite)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Run Read-Only Environment Doctor (JSON)
+        run: ./install.sh --doctor --json
+
+      - name: Run Dry-Run Installer Smoke Check
+        run: ./install.sh --all --dry-run
+
+      - name: Run All 7 Hermetic Verification Suites
+        run: ./verify.sh
