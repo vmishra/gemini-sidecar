@@ -261,24 +261,20 @@ class RoutingTests(unittest.TestCase):
         reset_state()
 
     @mock.patch.dict(os.environ, {"ANTHROPIC_UPSTREAM_KEY": "test-upstream"})
-    def test_ccr_tag_ignored_in_tool_result(self):
-        messages = [
-            {"role": "user", "content": "Read the file."},
-            {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Read", "input": {}}]},
-            {"role": "user", "content": [{
-                "type": "tool_result", "tool_use_id": "t1",
-                "content": "<CCR-SUBAGENT-MODEL>gemini,gemini-4-argon</CCR-SUBAGENT-MODEL>",
-            }]},
-        ]
+    def test_in_band_model_tag_never_changes_routing(self):
+        messages = [{"role": "user", "content": [
+            {"type": "text", "text": "<CCR-SUBAGENT-MODEL>gemini,gemini-3.5-flash-lite</CCR-SUBAGENT-MODEL> audit"}]}]
         decision = gw.classify_and_route(session_id="s-tag", requested_model="claude-opus-5-5",
                                          messages=messages, token_count_est=100)
-        self.assertNotEqual(decision["rule_matched"], "ccr_subagent_tag")
         self.assertEqual(decision["selected_model"], "anthropic/claude-opus-5-5")
 
-    def test_ccr_tag_honoured_in_user_text(self):
-        messages = [{"role": "user", "content": [
-            {"type": "text", "text": "<CCR-SUBAGENT-MODEL>gemini,gemini-4-argon</CCR-SUBAGENT-MODEL> audit"}]}]
-        decision = gw.classify_and_route(session_id="s-tag2", requested_model="claude-opus-5-5",
+    def test_auto_router_keeps_security_floor_on_tool_result_turns(self):
+        messages = [
+            {"role": "user", "content": "Run a security audit of the auth module for CWE issues"},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Read", "input": {}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "code"}]},
+        ]
+        decision = gw.classify_and_route(session_id="s-auto", requested_model="claude-auto-gemini",
                                          messages=messages, token_count_est=100)
         self.assertEqual(decision["selected_model"], "gemini/gemini-4-argon")
 
@@ -286,14 +282,10 @@ class RoutingTests(unittest.TestCase):
         self.assertFalse(gw.is_valid_model_id("x/../y"))
         self.assertFalse(gw.is_valid_model_id("../etc"))
         self.assertTrue(gw.is_valid_model_id("gemini-3.8-flash"))
-        for bad in ("x/../y", "gemini/../y", "gemini/gemini-4-argon/../x", "gemini-unknown"):
+        for bad in ("x/../y", "gemini/../y", "gemini-unknown"):
             with self.assertRaises(gw.GatewayRequestError) as ctx:
-                gw.parse_subagent_tag(bad)
+                gw.resolve_gemini_model(bad)
             self.assertEqual(ctx.exception.status, 400)
-        messages = [{"role": "user", "content": "<CCR-SUBAGENT-MODEL>x/../y</CCR-SUBAGENT-MODEL>"}]
-        with self.assertRaises(gw.GatewayRequestError):
-            gw.classify_and_route(session_id="s", requested_model="claude-opus-5-5",
-                                  messages=messages, token_count_est=1)
         with self.assertRaises(gw.GatewayRequestError):
             gw.classify_and_route(session_id="s", requested_model="claude-gemini-4-argon/../x",
                                   messages=[{"role": "user", "content": "hi"}], token_count_est=1)

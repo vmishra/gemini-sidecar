@@ -11,7 +11,7 @@ What it does:
     minimal liveness document.
   - Routes each /v1/messages request either to Gemini (gemini-4-argon,
     gemini-3.8-flash, gemini-3.5-flash-lite) or to api.anthropic.com, based on the
-    requested model, a <CCR-SUBAGENT-MODEL> tag in user text, simple keyword
+    requested model, simple keyword
     heuristics and a per-session pin.
   - Translates Anthropic requests to Gemini generateContent and translates the
     result back, including tool calls, thoughtSignature replay, and a valid
@@ -149,7 +149,6 @@ THOUGHT_SIGNATURE_VAULT = BoundedLRU(THOUGHT_VAULT_MAX_ENTRIES)
 BUDGET_LOCK = threading.Lock()
 GLOBAL_SPEND_USD = {"settled": 0.0, "reserved": 0.0}
 
-SUBAGENT_TAG_RE = re.compile(r"<CCR-SUBAGENT-MODEL>\s*([^<\s]+)\s*</CCR-SUBAGENT-MODEL>", re.IGNORECASE)
 SECURITY_RE = re.compile(
     r"\b(cve-\d+|cwe-\d+|security\s+audit|vulnerability|auth\s+bypass|sql\s+injection|"
     r"ssrf|xss|race\s+condition|deadlock|taint|cryptograph|privilege\s+escalation)\b",
@@ -341,19 +340,6 @@ def parse_selected_model(selected: str) -> Tuple[str, str]:
     return provider, model
 
 
-def parse_subagent_tag(raw_tag: str) -> str:
-    """Convert a <CCR-SUBAGENT-MODEL> value ("gemini,model", "gemini/model" or "model")."""
-    value = raw_tag.strip().replace(",", "/", 1)
-    if "/" in value:
-        provider, _, model = value.partition("/")
-        if provider.strip().lower() != "gemini":
-            raise GatewayRequestError(400, "invalid_request_error", "Invalid <CCR-SUBAGENT-MODEL> value.")
-        value = model
-    if "/" in value:
-        raise GatewayRequestError(400, "invalid_request_error", "Invalid <CCR-SUBAGENT-MODEL> value.")
-    return "gemini/" + resolve_gemini_model(value)
-
-
 # ---------------------------------------------------------------------------
 # Message helpers
 # ---------------------------------------------------------------------------
@@ -371,21 +357,6 @@ def _extract_text_from_content(raw_content: Any) -> str:
                 chunks.append(item["text"])
         return "\n".join(chunks)
     return ""
-
-
-def find_subagent_tag(messages: List[Any]) -> Optional[str]:
-    """Return the raw tag value from the first or last user message text, if present.
-
-    tool_result blocks and assistant messages are not inspected, so tool output
-    cannot switch models.
-    """
-    user_msgs = [m for m in messages if isinstance(m, dict) and m.get("role") == "user"]
-    candidates = user_msgs[:1] + user_msgs[-1:] if user_msgs else []
-    for msg in candidates:
-        match = SUBAGENT_TAG_RE.search(_extract_text_from_content(msg.get("content")))
-        if match:
-            return match.group(1)
-    return None
 
 
 def estimate_anthropic_input_tokens(body: Dict[str, Any]) -> int:
@@ -458,7 +429,7 @@ def classify_and_route(
 ) -> Dict[str, Any]:
     """Choose an upstream "provider/model" for a request.
 
-    Rules, in order: subagent tag, haiku/background, auto router (the only rule that
+    Rules, in order: haiku/background, auto router (the only rule that
     looks at prompt content), explicit Gemini model, 429 failover, subagent flag,
     existing pin, then Anthropic passthrough or a Gemini default. `has_safeguards` is accepted for compatibility and ignored.
     Raises GatewayRequestError for unknown or invalid model IDs.
@@ -467,26 +438,31 @@ def classify_and_route(
     unwrapped = normalize_model_id(requested_model or "")
     non_system = [m for m in messages if isinstance(m, dict) and m.get("role") != "system"]
     turn_count = len(non_system)
-    last_text = _extract_text_from_content(non_system[-1].get("content")) if non_system else ""
+    # Latest user text, skipping turns that only carry tool results, so the auto router keeps its
+    # security floor across tool-call turns.
+    last_text = ""
+    for msg in reversed(non_system):
+        if msg.get("role") == "user":
+            last_text = _extract_text_from_content(msg.get("content"))
+            if last_text.strip():
+                break
     digest = hashlib.sha256(last_text.encode("utf-8")).hexdigest()[:16]
     sec_target = resolve_security_target()
 
-    # 1. Explicit subagent tag in user text.
-    raw_tag = find_subagent_tag(messages)
-    if raw_tag is not None:
-        target = parse_subagent_tag(raw_tag)
-        return _decision(target, "ccr_subagent_tag", "Subagent model tag in user text.", False, digest)
+    # No routing on in-band tags such as <CCR-SUBAGENT-MODEL>: Claude Code places reminders and
+    # attachments (which can contain repository text) in user text blocks, so a tag there could
+    # redirect a conversation to another provider.
 
     # Note: compaction requests are not special-cased: Claude Code sends `context_management` on
     # ordinary turns too, so routing on it would move a pinned root thread to another provider.
     del is_summary
 
-    # 2. Haiku-class background calls.
+    # 1. Haiku-class background calls.
     if "haiku" in unwrapped or unwrapped == "gemini-3.5-flash-lite":
         return _decision("gemini/gemini-3.5-flash-lite", "background_haiku_flash_lite",
                          "Haiku-class request routed to gemini-3.5-flash-lite.", False, digest)
 
-    # 3. Auto router within the Gemini family, with a risk-word floor.
+    # 2. Auto router within the Gemini family, with a risk-word floor.
     if unwrapped in ("claude-auto-gemini", "auto-gemini"):
         has_risk = bool(RISK_WORDS_RE.search(last_text))
         if SECURITY_RE.search(last_text):
@@ -499,7 +475,7 @@ def classify_and_route(
             target, tier = "gemini/gemini-3.8-flash", "risk_floor" if has_risk else "medium"
         return _decision(target, "single_family_complexity_router", f"Auto router tier: {tier}.", False, digest)
 
-    # 4. Explicit Gemini model.
+    # 3. Explicit Gemini model.
     if unwrapped.startswith("gemini"):
         target = "gemini/" + resolve_gemini_model(unwrapped)
         pinned = False
@@ -507,13 +483,13 @@ def classify_and_route(
             pinned = _pin_if_absent(session_id, target, turn_count)
         return _decision(target, "explicit_gemini_role_or_agent", "Gemini model requested explicitly.", pinned, digest)
 
-    # 5. Primary provider quota failure: pin the session to Gemini.
+    # 4. Primary provider quota failure: pin the session to Gemini.
     if simulate_429_primary:
         target = "gemini/gemini-4-argon"
         pin_failover(session_id, target, turn_count)
         return _decision(target, "sticky_quota_failover_429", "Primary provider returned 429; session pinned to Gemini.", True, digest)
 
-    # 6. Caller-supplied subagent flag (not sent by Claude Code itself).
+    # 5. Caller-supplied subagent flag (not sent by Claude Code itself).
     if subagent_flag:
         if SECURITY_RE.search(last_text):
             target, rule = sec_target, "subagent_security_argon"
@@ -523,7 +499,7 @@ def classify_and_route(
             target, rule = "gemini/gemini-3.8-flash", "subagent_workhorse_flash"
         return _decision(target, rule, "Subagent request.", False, digest)
 
-    # 7. Existing pin. Failover pins apply from turn 1 because the primary is unavailable.
+    # 6. Existing pin. Failover pins apply from turn 1 because the primary is unavailable.
     with SESSION_PINS.lock:
         pin = SESSION_PINS.get(session_id)
         if pin is not None and (turn_count > 2 or pin.get("failover")):
@@ -531,7 +507,7 @@ def classify_and_route(
             target = pin["model"]
             return _decision(target, "session_pinned_cache_guard", "Session pinned to keep one provider per thread.", True, digest)
 
-    # 8. Any other model ID (Anthropic models, or Claude Code background calls that name a fixed
+    # 7. Any other model ID (Anthropic models, or Claude Code background calls that name a fixed
     # model). Honour the user's choice: forward to Anthropic when an upstream key is configured,
     # otherwise use a fast Gemini default. No keyword-based rerouting happens here, so a root
     # thread is never moved to another model because of what the prompt says.
@@ -594,14 +570,14 @@ def translate_anthropic_to_gemini_payload(body: Dict[str, Any], gemini_model_id:
         parts: List[Dict[str, Any]] = []
         sentinel_used = False
         if isinstance(raw_content, str):
-            parts.append({"text": SUBAGENT_TAG_RE.sub("", raw_content).strip() or " "})
+            parts.append({"text": raw_content.strip() or " "})
         elif isinstance(raw_content, list):
             for block in raw_content:
                 if not isinstance(block, dict):
                     continue
                 btype = block.get("type")
                 if btype == "text":
-                    cleaned = SUBAGENT_TAG_RE.sub("", str(block.get("text", ""))).strip()
+                    cleaned = str(block.get("text", "")).strip()
                     if cleaned:
                         parts.append({"text": cleaned})
                 elif btype == "image":
@@ -1419,6 +1395,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
         if not key:
             raise GatewayRequestError(401, "authentication_error",
                                       "ANTHROPIC_UPSTREAM_KEY is not set; cannot forward to api.anthropic.com.")
+        # The body is forwarded unchanged, so budget against the model actually requested upstream.
+        model = normalize_model_id(str(body.get("model") or model))
         allowed, reservation, message = reserve_budget(session_id, model, est_input, resolve_max_output_tokens(body))
         if not allowed:
             raise GatewayRequestError(403, "permission_error", message)

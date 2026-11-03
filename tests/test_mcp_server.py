@@ -210,6 +210,62 @@ class ReviewRegressionTests(Workspace):
         self.assertNotIn("AIzaSy", captured["config"])
 
 
+class SelfAuditRegressionTests(Workspace):
+    """Findings from running /gemini:security-audit on this repository."""
+
+    def test_glob_respects_gitignore_and_hidden(self):
+        corpus, meta = srv.collect_files(["src/*"], self.root)
+        self.assertNotIn("gitignored-canary", corpus)
+        self.assertNotIn("src/debug.log", meta["files"])
+        self.assertNotIn("canary-env", corpus)
+
+    def test_renamed_secret_is_excluded_from_review(self):
+        # src/.env is committed by the fixture.
+        subprocess.run(["git", "mv", "src/.env", "src/.env.example"], cwd=self.root, check=True)
+        (self.root / "src" / "app.py").write_text("def add(a, b):\n    return a * b\n")
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "k"}), \
+             mock.patch.object(srv.urllib.request, "urlopen", return_value=gemini_reply("ok")) as op:
+            srv.execute_tool("gemini4_review_diff", {"base": "HEAD", "include_full_files": False})
+        sent = json.loads(op.call_args[0][0].data)["contents"][0]["parts"][0]["text"]
+        self.assertNotIn("canary-env", sent)
+
+    def test_review_is_limited_to_workspace_subdirectory(self):
+        (self.root / "other").mkdir()
+        (self.root / "other" / "x.py").write_text("sibling = 1\n")
+        subprocess.run(["git", "add", "other"], cwd=self.root, check=True)
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "o"],
+                       cwd=self.root, check=True)
+        (self.root / "other" / "x.py").write_text("sibling = 2\n")
+        (self.root / "src" / "app.py").write_text("def add(a, b):\n    return 0\n")
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "k"}), \
+             mock.patch.object(srv.urllib.request, "urlopen", return_value=gemini_reply("ok")) as op:
+            srv.execute_tool("gemini4_review_diff", {"base": "HEAD", "include_full_files": False, "workspace_root": "src"})
+        sent = json.loads(op.call_args[0][0].data)["contents"][0]["parts"][0]["text"]
+        self.assertIn("return 0", sent)
+        self.assertNotIn("sibling", sent)
+
+    def test_private_key_regex_is_bounded(self):
+        import time as _t
+        start = _t.time()
+        srv.redact_secrets("-----BEGIN RSA PRIVATE KEY-----\n" * 5000)
+        self.assertLess(_t.time() - start, 2.0)
+
+    def test_staging_rejects_dot_and_secret_names(self):
+        _, written, refused, _ = srv.stage_generated_files(
+            "<<<FILE .>>>\nx\n<<<END FILE>>>\n<<<FILE .env>>>\nK=1\n<<<END FILE>>>\n<<<FILE a.py>>>\n1\n<<<END FILE>>>",
+            self.root, False)
+        self.assertEqual(written, ["a.py"])
+        self.assertEqual(len(refused), 2)
+
+    def test_agy_environment_is_scrubbed(self):
+        with mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": "/x", "GITHUB_TOKEN": "t", "GEMINI_API_KEY": "g"}):
+            env = srv._agy_env()
+        self.assertNotIn("CLAUDE_PROJECT_DIR", env)
+        self.assertNotIn("GITHUB_TOKEN", env)
+        self.assertNotIn("GEMINI4_WORKSPACE_ROOT", env)
+        self.assertEqual(env["GEMINI_API_KEY"], "g")
+
+
 class GeminiCallTests(Workspace):
     def call(self, name, args, reply=None):
         with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), \
@@ -285,6 +341,15 @@ class GeminiCallTests(Workspace):
                                                          "paths": ["src/app.py"]})
         self.assertFalse(res["isError"])
         self.assertIn("FAILED test_add", json.loads(op.call_args[0][0].data)["contents"][0]["parts"][0]["text"])
+
+    def test_vertex_location_cannot_change_host(self):
+        env = {"GOOGLE_GENAI_USE_VERTEXAI": "true", "GOOGLE_CLOUD_PROJECT": "my-project",
+               "GOOGLE_CLOUD_LOCATION": "evil.example.com/x#"}
+        with mock.patch.dict(os.environ, env), mock.patch.object(srv, "_vertex_token", return_value="tok"), \
+             mock.patch.object(srv.urllib.request, "urlopen") as op:
+            with self.assertRaises(srv.ToolError):
+                srv.call_gemini("gemini-3.8-flash", "s", "p")
+        op.assert_not_called()
 
     def test_vertex_flag_from_env_not_overridden_by_plugin_default(self):
         with mock.patch.dict(os.environ, {"GEMINI4_PLUGIN_USE_VERTEX": "false", "GOOGLE_GENAI_USE_VERTEXAI": "true"}):

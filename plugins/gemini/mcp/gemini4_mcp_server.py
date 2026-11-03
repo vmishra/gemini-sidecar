@@ -152,7 +152,7 @@ SECRET_FILE_PATTERNS = [
 SECRET_FILE_ALLOW = {".env.example", ".env.sample", ".env.template", "env.example"}
 
 SECRET_CONTENT_PATTERNS: List[Tuple[str, "re.Pattern[str]"]] = [
-    ("private-key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----")),
+    ("private-key", re.compile(r"-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----[\s\S]{0,16384}?-----END [A-Z ]{0,40}PRIVATE KEY-----")),
     ("google-api-key", re.compile(r"AIza[0-9A-Za-z_\-]{35}")),
     ("gcp-oauth-token", re.compile(r"ya29\.[0-9A-Za-z_\-]{20,}")),
     ("anthropic-key", re.compile(r"sk-ant-[0-9A-Za-z_\-]{20,}")),
@@ -316,7 +316,14 @@ def collect_files(
         elif resolved.is_dir():
             candidates.extend(_expand_dir(resolved, root, use_git))
         elif any(ch in target for ch in "*?["):
+            # Same filters as directory expansion: .gitignore, ignored dirs, hidden paths.
+            tracked = set(_expand_dir(root, root, use_git)) if use_git else None
             for match in sorted(root.glob(target)):
+                rel_parts = match.relative_to(root).parts
+                if any(part in IGNORE_DIRS or part.startswith(".") for part in rel_parts):
+                    continue
+                if tracked is not None and match not in tracked:
+                    continue
                 m = match.resolve()
                 if m.is_file() and _is_within(m, root):
                     candidates.append(m)
@@ -559,6 +566,11 @@ def call_gemini(
             )
         backend = "vertex-ai"
         loc = creds["location"]
+        # Both values end up in the URL that carries the access token; accept only plain GCP identifiers.
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", loc):
+            raise ToolError(f"Invalid GOOGLE_CLOUD_LOCATION: {loc!r}")
+        if not re.fullmatch(r"[a-z][a-z0-9.:-]{4,62}[a-z0-9]", creds["project"]):
+            raise ToolError("Invalid GOOGLE_CLOUD_PROJECT value.")
         host = "aiplatform.googleapis.com" if loc == "global" else f"{loc}-aiplatform.googleapis.com"
         url = (
             f"https://{host}/v1/projects/{urllib.parse.quote(creds['project'])}"
@@ -755,7 +767,8 @@ def stage_generated_files(text: str, root: Path, truncated: bool) -> Tuple[Path,
     for match in matches:
         rel = match.group(1).strip().strip("`'\"")
         rel_path = Path(rel)
-        if (not rel or rel_path.is_absolute() or ".." in rel_path.parts
+        if (not rel or rel_path.is_absolute() or ".." in rel_path.parts or not rel_path.parts
+                or rel_path == Path(".") or is_secret_file(rel_path)
                 or _has_git_segment(rel_path.parts)
                 or any(part.lower() == STAGING_DIRNAME for part in rel_path.parts)):
             refused.append(rel)
@@ -797,9 +810,13 @@ def read_log_tail(log_rel: str, root: Path, budget: int) -> str:
 def file_change_summary(root: Path, stage_root: Path, rel: str) -> str:
     """'+A -R lines' for a staged file against the working-tree original."""
     new = (stage_root / rel).read_text(encoding="utf-8", errors="replace").splitlines()
-    orig_path = root / rel
+    orig_path = (root / rel).resolve()
+    if not _is_within(orig_path, root) or is_secret_file(orig_path):
+        return f"{len(new)} lines (original not readable)"
     if not orig_path.is_file():
         return f"new, {len(new)} lines"
+    if orig_path.stat().st_size > MAX_FILE_BYTES:
+        return f"modified, {len(new)} lines (original too large to compare)"
     old = orig_path.read_text(encoding="utf-8", errors="replace").splitlines()
     added = removed = 0
     for line in difflib.unified_diff(old, new, lineterm="", n=0):
@@ -823,6 +840,22 @@ def find_agy() -> Optional[str]:
     if local.is_file() and os.access(local, os.X_OK):
         return str(local)
     return shutil.which("agy")
+
+
+_AGY_ENV_KEEP = {"GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS"}
+
+
+def _agy_env() -> Dict[str, str]:
+    """Environment for agy without pointers to the real workspace or unrelated credentials."""
+    env = {}
+    for key, val in os.environ.items():
+        upper = key.upper()
+        if upper in ("PWD", "OLDPWD", "CLAUDE_PROJECT_DIR") or upper.startswith("GEMINI4_"):
+            continue
+        if upper not in _AGY_ENV_KEEP and any(w in upper for w in ("TOKEN", "SECRET", "PASSWORD", "KEY", "CREDENTIAL")):
+            continue
+        env[key] = val
+    return env
 
 
 def run_agy_plan(prompt: str, files: List[str], root: Path, model: str, effort: str) -> Tuple[Optional[Dict[str, Any]], str]:
@@ -850,9 +883,12 @@ def run_agy_plan(prompt: str, files: List[str], root: Path, model: str, effort: 
     # the workspace and secret checks (with tokens redacted), never the real workspace.
     with tempfile.TemporaryDirectory(prefix="gemini4-agy-") as tmp:
         for rel in files:
+            src = (root / rel).resolve()
+            if not _is_within(src, root) or is_secret_file(src) or not src.is_file():
+                continue
             dest = Path(tmp) / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
-            text = (root / rel).read_text(encoding="utf-8", errors="replace")
+            text = src.read_text(encoding="utf-8", errors="replace")
             dest.write_text(redact_secrets(text)[0], encoding="utf-8")
         cmd = [
             agy, "-p", full, "--model", model, "--effort", effort, "--mode", "plan",
@@ -861,7 +897,7 @@ def run_agy_plan(prompt: str, files: List[str], root: Path, model: str, effort: 
         ]
         try:
             proc = subprocess.run(
-                cmd, cwd=tmp, capture_output=True, text=True,
+                cmd, cwd=tmp, env=_agy_env(), capture_output=True, text=True,
                 timeout=REQUEST_TIMEOUT_S + 60, check=False,
             )
         except (OSError, subprocess.SubprocessError) as exc:
@@ -1113,21 +1149,27 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
         base = str(args.get("base") or "HEAD").strip()
         if not _git_ref_ok(base):
             raise ToolError(f"Invalid git ref: {base!r}")
-        diff_args = ["diff", "--cached"] if args.get("staged_only") else ["diff", base]
+        # --relative: only changes under the workspace root; --no-renames: a renamed secret file
+        # shows up under its old name too, so the secret filter sees it.
+        diff_args = (["diff", "--relative", "--no-renames", "--cached"] if args.get("staged_only")
+                     else ["diff", "--relative", "--no-renames", base])
         names_out = _git(root, *diff_args, "--name-only", "-z")
         if names_out is None:
             raise ToolError(f"`git diff {base}` failed. Check that the ref exists.")
         changed = [n for n in names_out.split("\0") if n]
-        allowed = [n for n in changed if not is_secret_file(Path(n))]
+        # Example env files are excluded too: renaming .env to .env.example would otherwise put
+        # the real values in the diff under an allow-listed name.
+        allowed = [n for n in changed
+                   if not is_secret_file(Path(n)) and Path(n).name.lower() not in SECRET_FILE_ALLOW]
         excluded = sorted(set(changed) - set(allowed))
         if not allowed:
             raise ToolError("No reviewable changes found." + (f" Excluded secret files: {excluded}" if excluded else ""))
         diff = _git(root, *diff_args, "--unified=5", "--", *allowed, timeout=60) or ""
-        diff, redactions = redact_secrets(diff)
         if len(diff) > MAX_CONTEXT_CHARS // 2:
             raise ToolError(
                 f"Diff is {len(diff):,} chars, too large for one review. Review in parts with a narrower base."
             )
+        diff, redactions = redact_secrets(diff)
         context, meta = "", None
         if args.get("include_full_files", True):
             existing = [n for n in allowed if (root / n).is_file()]
