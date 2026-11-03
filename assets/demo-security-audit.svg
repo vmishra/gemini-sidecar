@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 464" width="1040" height="464" role="img" aria-label="Claude Code · /gemini:security-audit">
+<title>Claude Code · /gemini:security-audit</title>
+<rect x="1" y="1" width="1038" height="462" rx="10" fill="#0D1117" stroke="#30363D"/>
+<rect x="1" y="1" width="1038" height="34" rx="10" fill="#161B22"/><rect x="1" y="25" width="1038" height="10" fill="#161B22"/>
+<circle cx="22" cy="18" r="6" fill="#FF5F56"/><circle cx="42" cy="18" r="6" fill="#FFBD2E"/><circle cx="62" cy="18" r="6" fill="#27C93F"/>
+<text x="520.0" y="22" text-anchor="middle" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif" font-size="12.5" fill="#8B949E">Claude Code · /gemini:security-audit</text>
+<g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">
+<text x="22" y="58"><tspan fill="#85E89D" font-weight="700">❯ </tspan><tspan fill="#FFFFFF" font-weight="700">/gemini:security-audit router/gemini4_gateway.py plugins/gemini/mcp/gemini4_mcp_server.py install.sh</tspan></text>
+<text x="22" y="77"><tspan fill="#E6E8EB"></tspan></text>
+<text x="22" y="96"><tspan fill="#B392F0">⏺ </tspan><tspan fill="#B392F0">gemini4 · gemini4_security_audit(paths: [3 files])</tspan></text>
+<text x="22" y="115"><tspan fill="#8B949E">  ⎿ gemini-4-argon, thinking: high · 3 files, ~40K tokens</tspan></text>
+<text x="22" y="134"><tspan fill="#E6E8EB"></tspan></text>
+<text x="22" y="153"><tspan fill="#FFFFFF" font-weight="700">Severity  CWE       Location                     Issue</tspan></text>
+<text x="22" y="172"><tspan fill="#FFDF5D">Medium    </tspan><tspan fill="#E6E8EB">CWE-441   gemini4_gateway.py:381       In-band &lt;CCR-SUBAGENT-MODEL&gt; tag in reminder text can</tspan></text>
+<text x="22" y="191"><tspan fill="#E6E8EB">          </tspan><tspan fill="#E6E8EB">                                       redirect a Claude conversation to another provider</tspan></text>
+<text x="22" y="210"><tspan fill="#FFDF5D">Medium    </tspan><tspan fill="#E6E8EB">CWE-200   gemini4_mcp_server.py:318    Glob paths skip the .gitignore and hidden-file filters</tspan></text>
+<text x="22" y="229"><tspan fill="#FFDF5D">Medium    </tspan><tspan fill="#E6E8EB">CWE-200   gemini4_mcp_server.py:1121   Renamed .env can reach the diff review under a new name</tspan></text>
+<text x="22" y="248"><tspan fill="#79B8FF">Low       </tspan><tspan fill="#E6E8EB">CWE-59    gemini4_mcp_server.py:808    Change summary reads the original file without checks</tspan></text>
+<text x="22" y="267"><tspan fill="#79B8FF">Low       </tspan><tspan fill="#E6E8EB">CWE-670   gemini4_gateway.py:468       Auto router loses its security floor on tool-result turns</tspan></text>
+<text x="22" y="286"><tspan fill="#79B8FF">Low       </tspan><tspan fill="#E6E8EB">CWE-200   gemini4_mcp_server.py:854    Antigravity CLI inherits workspace paths in its environment</tspan></text>
+<text x="22" y="305"><tspan fill="#E6E8EB"></tspan></text>
+<text x="22" y="324"><tspan fill="#FFFFFF" font-weight="700">My assessment</tspan><tspan fill="#8B949E"> (I read only the cited lines)</tspan></text>
+<text x="22" y="343"><tspan fill="#E6E8EB">  All six are real. Each comes with a concrete exploit path and fix; none is a false positive.</tspan></text>
+<text x="22" y="362"><tspan fill="#E6E8EB">  The first two are worth fixing before release. I haven&#x27;t changed any code — want me to apply the fixes?</tspan></text>
+<text x="22" y="381"><tspan fill="#E6E8EB"></tspan></text>
+<text x="22" y="400"><tspan fill="#8B949E">  ───</tspan></text>
+<text x="22" y="419"><tspan fill="#9ECBFF">  gemini-4-argon via vertex-ai | 391s | input 57,896 tok | output 32,223 tok (mostly thinking) | ~$0.44</tspan></text>
+</g></svg>

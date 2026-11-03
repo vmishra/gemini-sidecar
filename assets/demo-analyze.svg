@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 559" width="1040" height="559" role="img" aria-label="Claude Code · /gemini:analyze">
+<title>Claude Code · /gemini:analyze</title>
+<rect x="1" y="1" width="1038" height="557" rx="10" fill="#0D1117" stroke="#30363D"/>
+<rect x="1" y="1" width="1038" height="34" rx="10" fill="#161B22"/><rect x="1" y="25" width="1038" height="10" fill="#161B22"/>
+<circle cx="22" cy="18" r="6" fill="#FF5F56"/><circle cx="42" cy="18" r="6" fill="#FFBD2E"/><circle cx="62" cy="18" r="6" fill="#27C93F"/>
+<text x="520.0" y="22" text-anchor="middle" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif" font-size="12.5" fill="#8B949E">Claude Code · /gemini:analyze</text>
+<g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">
+<text x="22" y="58"><tspan fill="#85E89D" font-weight="700">❯ </tspan><tspan fill="#FFFFFF" font-weight="700">/gemini:analyze How does a request flow through this repo, and where are the security checks? .</tspan></text>
+<text x="22" y="77"><tspan fill="#E6E8EB"></tspan></text>
+<text x="22" y="96"><tspan fill="#B392F0">⏺ </tspan><tspan fill="#B392F0">gemini4 · gemini4_analyze_codebase(paths: [&quot;.&quot;], model_tier: &quot;flash&quot;)</tspan></text>
+<text x="22" y="115"><tspan fill="#8B949E">  ⎿ read 39 files from disk (~103K tokens) · 2 secret-like strings redacted · .gitignore respected</tspan></text>
+<text x="22" y="134"><tspan fill="#E6E8EB"></tspan></text>
+<text x="22" y="153"><tspan fill="#FFFFFF" font-weight="700">Main components</tspan></text>
+<text x="22" y="172"><tspan fill="#E6E8EB">  1. MCP server   plugins/gemini/mcp/gemini4_mcp_server.py    reads files locally, calls Gemini, answers</tspan></text>
+<text x="22" y="191"><tspan fill="#E6E8EB">  2. Plugin       plugins/gemini/skills/, agents/             slash commands and subagents for Claude Code</tspan></text>
+<text x="22" y="210"><tspan fill="#E6E8EB">  3. Gateway      router/gemini4_gateway.py                   optional Anthropic Messages API, 127.0.0.1</tspan></text>
+<text x="22" y="229"><tspan fill="#E6E8EB"></tspan></text>
+<text x="22" y="248"><tspan fill="#FFFFFF" font-weight="700">Flow A: MCP tool call</tspan></text>
+<text x="22" y="267"><tspan fill="#E6E8EB">  resolve_workspace() confines the root                           gemini4_mcp_server.py:183</tspan></text>
+<text x="22" y="286"><tspan fill="#E6E8EB">  collect_files() expands via git ls-files, drops secrets         gemini4_mcp_server.py:271</tspan></text>
+<text x="22" y="305"><tspan fill="#E6E8EB">  call_gemini() sends the corpus, retries 429 and 5xx             gemini4_mcp_server.py:534</tspan></text>
+<text x="22" y="324"><tspan fill="#E6E8EB">  stage_generated_files() writes only under .gemini4-staging/     gemini4_mcp_server.py:747</tspan></text>
+<text x="22" y="343"><tspan fill="#E6E8EB"></tspan></text>
+<text x="22" y="362"><tspan fill="#FFFFFF" font-weight="700">Where security happens</tspan></text>
+<text x="22" y="381"><tspan fill="#E6E8EB">  • constant-time token check on every gateway endpoint           gemini4_gateway.py:269</tspan></text>
+<text x="22" y="400"><tspan fill="#E6E8EB">  • model IDs validated before they reach a URL                   gemini4_gateway.py:292</tspan></text>
+<text x="22" y="419"><tspan fill="#E6E8EB">  • prompt text never logged                                      gemini4_gateway.py:218</tspan></text>
+<text x="22" y="438"><tspan fill="#E6E8EB"></tspan></text>
+<text x="22" y="457"><tspan fill="#8B949E">  ───</tspan></text>
+<text x="22" y="476"><tspan fill="#9ECBFF">  gemini-3.8-flash via vertex-ai | 16.5s | input 103,003 tok | output 1,958 tok | ~$0.085</tspan></text>
+<text x="22" y="495"><tspan fill="#E6E8EB"></tspan></text>
+<text x="22" y="514"><tspan fill="#85E89D">Only this answer (~2K tokens) entered the conversation. The 103K tokens of source stayed with Gemini.</tspan></text>
+</g></svg>

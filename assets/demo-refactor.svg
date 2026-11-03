@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 407" width="1040" height="407" role="img" aria-label="Claude Code · /gemini:refactor">
+<title>Claude Code · /gemini:refactor</title>
+<rect x="1" y="1" width="1038" height="405" rx="10" fill="#0D1117" stroke="#30363D"/>
+<rect x="1" y="1" width="1038" height="34" rx="10" fill="#161B22"/><rect x="1" y="25" width="1038" height="10" fill="#161B22"/>
+<circle cx="22" cy="18" r="6" fill="#FF5F56"/><circle cx="42" cy="18" r="6" fill="#FFBD2E"/><circle cx="62" cy="18" r="6" fill="#27C93F"/>
+<text x="520.0" y="22" text-anchor="middle" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif" font-size="12.5" fill="#8B949E">Claude Code · /gemini:refactor</text>
+<g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">
+<text x="22" y="58"><tspan fill="#85E89D" font-weight="700">❯ </tspan><tspan fill="#FFFFFF" font-weight="700">/gemini:refactor use parameterized SQL in get_user app/db.py</tspan></text>
+<text x="22" y="77"><tspan fill="#E6E8EB"></tspan></text>
+<text x="22" y="96"><tspan fill="#B392F0">⏺ </tspan><tspan fill="#B392F0">gemini4 · gemini4_long_decode_refactor(paths: [&quot;app/db.py&quot;], mode: &quot;refactor&quot;)</tspan></text>
+<text x="22" y="115"><tspan fill="#8B949E">  ⎿ gemini-4-argon · complete files written to .gemini4-staging/20261103-140020/</tspan></text>
+<text x="22" y="134"><tspan fill="#E6E8EB"></tspan></text>
+<text x="22" y="153"><tspan fill="#E6E8EB">Gemini staged the change. Your working tree hasn&#x27;t been touched yet.</tspan></text>
+<text x="22" y="172"><tspan fill="#E6E8EB"></tspan></text>
+<text x="22" y="191"><tspan fill="#FFFFFF" font-weight="700">  File        Lines   Change</tspan></text>
+<text x="22" y="210"><tspan fill="#E6E8EB">  app/db.py   </tspan><tspan fill="#85E89D">+1 −1</tspan><tspan fill="#E6E8EB">   username is now passed as a ? parameter instead of an f-string</tspan></text>
+<text x="22" y="229"><tspan fill="#E6E8EB"></tspan></text>
+<text x="22" y="248"><tspan fill="#E6E8EB">I checked it against the spec: same signature, same columns, same fetchone(). Only the query</tspan></text>
+<text x="22" y="267"><tspan fill="#E6E8EB">construction changed, which closes the SQL injection.</tspan></text>
+<text x="22" y="286"><tspan fill="#E6E8EB"></tspan></text>
+<text x="22" y="305"><tspan fill="#E6E8EB">There are no tests for app/db.py yet. After applying I&#x27;d check that a normal name still matches</tspan></text>
+<text x="22" y="324"><tspan fill="#E6E8EB">and that  x&#x27; OR &#x27;1&#x27;=&#x27;1  matches nothing.</tspan></text>
+<text x="22" y="343"><tspan fill="#E6E8EB"></tspan></text>
+<text x="22" y="362"><tspan fill="#FFFFFF" font-weight="700">Should I apply it?</tspan></text>
+</g></svg>

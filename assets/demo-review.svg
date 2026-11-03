@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 445" width="1040" height="445" role="img" aria-label="Claude Code · /gemini:review">
+<title>Claude Code · /gemini:review</title>
+<rect x="1" y="1" width="1038" height="443" rx="10" fill="#0D1117" stroke="#30363D"/>
+<rect x="1" y="1" width="1038" height="34" rx="10" fill="#161B22"/><rect x="1" y="25" width="1038" height="10" fill="#161B22"/>
+<circle cx="22" cy="18" r="6" fill="#FF5F56"/><circle cx="42" cy="18" r="6" fill="#FFBD2E"/><circle cx="62" cy="18" r="6" fill="#27C93F"/>
+<text x="520.0" y="22" text-anchor="middle" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif" font-size="12.5" fill="#8B949E">Claude Code · /gemini:review</text>
+<g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">
+<text x="22" y="58"><tspan fill="#85E89D" font-weight="700">❯ </tspan><tspan fill="#FFFFFF" font-weight="700">/gemini:review</tspan></text>
+<text x="22" y="77"><tspan fill="#E6E8EB"></tspan></text>
+<text x="22" y="96"><tspan fill="#8B949E">  1 file changed: app/mathx.py | 2 ++</tspan></text>
+<text x="22" y="115"><tspan fill="#B392F0">⏺ </tspan><tspan fill="#B392F0">gemini4 · gemini4_review_diff(base: &quot;HEAD&quot;)</tspan></text>
+<text x="22" y="134"><tspan fill="#8B949E">  ⎿ server ran git diff itself · 1 changed file + full current version sent</tspan></text>
+<text x="22" y="153"><tspan fill="#E6E8EB"></tspan></text>
+<text x="22" y="172"><tspan fill="#FFFFFF" font-weight="700">1. app/mathx.py:2 — an empty list still crashes.</tspan></text>
+<text x="22" y="191"><tspan fill="#E6E8EB">   The new `if xs is None` check only catches None; mean([]) still raises ZeroDivisionError.</tspan></text>
+<text x="22" y="210"><tspan fill="#F97583">   - if xs is None:</tspan></text>
+<text x="22" y="229"><tspan fill="#85E89D">   + if not xs:</tspan></text>
+<text x="22" y="248"><tspan fill="#E6E8EB"></tspan></text>
+<text x="22" y="267"><tspan fill="#FFFFFF" font-weight="700">2. app/mathx.py:4 — generators fail.</tspan></text>
+<text x="22" y="286"><tspan fill="#E6E8EB">   sum() consumes a generator, then len() raises TypeError. Use items = list(xs) first.</tspan></text>
+<text x="22" y="305"><tspan fill="#E6E8EB"></tspan></text>
+<text x="22" y="324"><tspan fill="#FFFFFF" font-weight="700">3. Missing tests</tspan><tspan fill="#E6E8EB"> for None, [] and a normal list.</tspan></text>
+<text x="22" y="343"><tspan fill="#E6E8EB"></tspan></text>
+<text x="22" y="362"><tspan fill="#FFFFFF" font-weight="700">Verdict: </tspan><tspan fill="#FFDF5D" font-weight="700">SHIP WITH FIXES</tspan></text>
+<text x="22" y="381"><tspan fill="#E6E8EB"></tspan></text>
+<text x="22" y="400"><tspan fill="#E6E8EB">Want me to apply the fix and add those tests? I won&#x27;t change anything until you say so.</tspan></text>
+</g></svg>
