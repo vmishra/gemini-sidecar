@@ -18,8 +18,6 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            python: "3.9"
-          - os: ubuntu-latest
             python: "3.13"
           - os: macos-latest
             python: "3.13"
@@ -38,3 +36,17 @@ jobs:
 
       - name: Offline checks and unit tests
         run: ./verify.sh
+
+  # Oldest supported Python. Hosted runners no longer ship 3.9, so use the official image.
+  verify-python39:
+    name: python:3.9 container
+    runs-on: ubuntu-latest
+    container: python:3.9
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Offline checks and unit tests
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          ./install.sh --doctor --json
+          ./verify.sh
