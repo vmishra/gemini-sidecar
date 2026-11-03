@@ -1,25 +1,27 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 220" width="1120" height="220" role="img" aria-labelledby="hero-title hero-desc">
-  <title id="hero-title">gemini-sidecar</title>
-  <desc id="hero-desc">Gemini tools for Claude Code, Codex CLI and Cursor: offload large reads, security audits, reviews and long generations to Gemini without switching your agent's model.</desc>
-  <defs>
-    <clipPath id="card"><rect x="4" y="4" width="1112" height="212" rx="16"/></clipPath>
-  </defs>
-  <rect x="4" y="4" width="1112" height="212" rx="16" fill="#FFFFFF" stroke="#DADCE0" stroke-width="1.5"/>
-  <g clip-path="url(#card)">
-    <rect x="4" y="4" width="278" height="7" fill="#4285F4"/>
-    <rect x="282" y="4" width="278" height="7" fill="#EA4335"/>
-    <rect x="560" y="4" width="278" height="7" fill="#FBBC04"/>
-    <rect x="838" y="4" width="278" height="7" fill="#34A853"/>
-  </g>
-  <text x="44" y="78" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="40" font-weight="700" fill="#202124">gemini-sidecar</text>
-  <text x="44" y="116" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="18" fill="#3C4043">Hand the heavy reading and writing to Gemini. Keep your coding agent.</text>
-  <text x="44" y="146" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="15" fill="#5F6368">Claude Code plugin, Codex CLI and Cursor MCP server, and an optional local gateway.</text>
-  <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13" fill="#1A73E8">
-    <rect x="44" y="166" width="150" height="28" rx="14" fill="#E8F0FE"/><text x="119" y="185" text-anchor="middle">/gemini:analyze</text>
-    <rect x="204" y="166" width="190" height="28" rx="14" fill="#E8F0FE"/><text x="299" y="185" text-anchor="middle">/gemini:security-audit</text>
-    <rect x="404" y="166" width="140" height="28" rx="14" fill="#E8F0FE"/><text x="474" y="185" text-anchor="middle">/gemini:review</text>
-    <rect x="554" y="166" width="150" height="28" rx="14" fill="#E8F0FE"/><text x="629" y="185" text-anchor="middle">/gemini:refactor</text>
-    <rect x="714" y="166" width="170" height="28" rx="14" fill="#E8F0FE"/><text x="799" y="185" text-anchor="middle">/gemini:test-triage</text>
-    <rect x="894" y="166" width="204" height="28" rx="14" fill="#E8F0FE"/><text x="996" y="185" text-anchor="middle">/gemini:ask-antigravity</text>
-  </g>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 280" width="1120" height="280" role="img" aria-labelledby="t d">
+<title id="t">gemini-sidecar</title>
+<desc id="d">Your coding agent hands its biggest reads and writes to Gemini. 103,003 tokens of source go to Gemini; a 1,958-token answer comes back.</desc>
+<defs><marker id="g" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#1A7F37"/></marker></defs>
+<rect x="1" y="1" width="1118" height="278" rx="16" fill="#FFFFFF" stroke="#D0D7DE"/>
+<text x="52" y="96" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="50" font-weight="700" fill="#1F2328" letter-spacing="-1">gemini-sidecar</text>
+<text x="54" y="138" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="20" fill="#1F2328">Your coding agent hands its biggest reads</text>
+<text x="54" y="164" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="20" fill="#1F2328">and writes to Gemini.</text>
+<text x="54" y="190" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="20" fill="#59636E">You get the answer. Your context stays small.</text>
+<rect x="52" y="214" width="392" height="34" rx="8" fill="#F6F8FA" stroke="#D0D7DE"/>
+<text x="68" y="236" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" fill="#1F2328">/plugin install gemini@gemini-sidecar</text>
+<!-- agent lane -->
+<line x1="640" y1="92" x2="1072" y2="92" stroke="#1F2328" stroke-width="3" stroke-linecap="round"/>
+<circle cx="640" cy="92" r="6" fill="#1F2328"/>
+<text x="640" y="74" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#1F2328">Your agent</text>
+<text x="726" y="74" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" fill="#59636E">Claude Code, Codex or Cursor, on the model you chose</text>
+<!-- outgoing band: drops from the lane, turns into Gemini; width to scale -->
+<path d="M690 92 C690 232.0 704 242.0 750 242.0 H884 V170.0 H780 C766 170.0 762 164.0 762 146.0 V92 Z" fill="#1A56DB"/>
+<text x="726" y="266" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="700" fill="#1A56DB" text-anchor="start">103,003 tokens in</text>
+<!-- Gemini block -->
+<rect x="884" y="168" width="188" height="76" rx="12" fill="#EBF2FF" stroke="#1A56DB" stroke-width="1.5"/>
+<text x="904" y="200" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="18" font-weight="700" fill="#1E3A8A">Gemini reads it all</text>
+<text x="904" y="222" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" fill="#1E3A8A">1M-token context</text>
+<!-- return hairline -->
+<path d="M1032 168 C1032 132 1032 112 1032 98" stroke="#1A7F37" stroke-width="2.0" fill="none" marker-end="url(#g)"/>
+<text x="1022" y="136" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#1A7F37" text-anchor="end">1,958-token answer back</text>
 </svg>

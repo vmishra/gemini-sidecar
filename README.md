@@ -6,8 +6,6 @@
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B%20stdlib%20only-4285F4)](./verify.sh)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-34A853)](./LICENSE)
 
-**Your coding agent hands its biggest reads and writes to Gemini. You get the answer; your context stays small.**
-
 </div>
 
 <p align="center">
