@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Offline verification for gemini4-harness-kit. Makes no network calls and needs no credentials.
+# Offline verification for gemini-sidecar. Makes no network calls and needs no credentials.
 #
 #   ./verify.sh
 #

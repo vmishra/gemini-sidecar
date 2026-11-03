@@ -1,5 +1,5 @@
 {
-  "name": "gemini4-harness-kit",
+  "name": "gemini-sidecar",
   "description": "Gemini tools for coding agents: offload large reads, security audits, reviews and long generations to Gemini.",
   "owner": {
     "name": "Vikas Mishra"

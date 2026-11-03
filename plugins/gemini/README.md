@@ -5,17 +5,17 @@ Gemini-backed slash commands for Claude Code. A bundled MCP server reads files f
 ## Install
 
 ```text
-/plugin marketplace add vmishra/gemini4-harness-kit
-/plugin install gemini@gemini4-harness-kit
+/plugin marketplace add vmishra/gemini-sidecar
+/plugin install gemini@gemini-sidecar
 ```
 
 One step on Claude Code 2.1.275 or later:
 
 ```text
-/plugin install gemini --marketplace vmishra/gemini4-harness-kit
+/plugin install gemini --marketplace vmishra/gemini-sidecar
 ```
 
-Credentials: run `/plugin configure gemini@gemini4-harness-kit` to store a Gemini API key, or set `GEMINI_API_KEY`. For Vertex AI, set `GOOGLE_GENAI_USE_VERTEXAI=true` and `GOOGLE_CLOUD_PROJECT`, and run `gcloud auth application-default login`. Restart Claude Code, then run `/gemini:status`.
+Credentials: run `/plugin configure gemini@gemini-sidecar` to store a Gemini API key, or set `GEMINI_API_KEY`. For Vertex AI, set `GOOGLE_GENAI_USE_VERTEXAI=true` and `GOOGLE_CLOUD_PROJECT`, and run `gcloud auth application-default login`. Restart Claude Code, then run `/gemini:status`.
 
 ## Commands
 

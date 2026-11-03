@@ -582,7 +582,7 @@ def call_gemini(
         raise ToolError(
             "No Gemini credentials configured. Set GEMINI_API_KEY (paid Gemini API key), "
             "or GOOGLE_GENAI_USE_VERTEXAI=true with GOOGLE_CLOUD_PROJECT for Vertex AI. "
-            "In Claude Code you can also run `/plugin configure gemini@gemini4-harness-kit`."
+            "In Claude Code you can also run `/plugin configure gemini@gemini-sidecar`."
         )
 
     started = time.time()

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Installer for gemini4-harness-kit.
+# Installer for gemini-sidecar.
 #
 #   ./install.sh --doctor [--json]       read-only readiness check (never prints secret values)
 #   ./install.sh --claude                install the Claude Code plugin (/gemini:* commands)
@@ -100,7 +100,7 @@ elif vertex:
     add("credentials", "fail", "GOOGLE_GENAI_USE_VERTEXAI is set but GOOGLE_CLOUD_PROJECT is not")
 else:
     add("credentials", "todo", "set GEMINI_API_KEY, or GOOGLE_GENAI_USE_VERTEXAI=true + GOOGLE_CLOUD_PROJECT "
-        "(the Claude Code plugin can also store a key via /plugin configure gemini@gemini4-harness-kit)")
+        "(the Claude Code plugin can also store a key via /plugin configure gemini@gemini-sidecar)")
 
 try:
     out = subprocess.run([sys.executable, str(kit / "plugins/gemini/mcp/gemini4_mcp_server.py"), "--self-test"],
@@ -142,9 +142,9 @@ install_claude() {
   echo "Claude Code plugin"
   if ! have claude; then echo "   claude not found; skipping."; return; fi
   run claude plugin marketplace add "$KIT_DIR"
-  run claude plugin install gemini@gemini4-harness-kit
+  run claude plugin install gemini@gemini-sidecar
   echo "   Done. Restart Claude Code, then try /gemini:status."
-  echo "   To store an API key: /plugin configure gemini@gemini4-harness-kit (inside Claude Code)."
+  echo "   To store an API key: /plugin configure gemini@gemini-sidecar (inside Claude Code)."
 }
 
 # --------------------------------------------------------------------------- codex
@@ -163,10 +163,10 @@ import json, sys
 cfg, server, example = sys.argv[1:4]
 block = open(example, encoding="utf-8").read()
 start = block.index("[mcp_servers.gemini4]")
-block = block[start:].replace('"/absolute/path/to/gemini4-harness-kit/plugins/gemini/mcp/gemini4_mcp_server.py"',
+block = block[start:].replace('"/absolute/path/to/gemini-sidecar/plugins/gemini/mcp/gemini4_mcp_server.py"',
                               json.dumps(server))  # JSON string escaping is valid TOML
 with open(cfg, "a", encoding="utf-8") as fh:
-    fh.write("\n# Added by gemini4-harness-kit install.sh\n" + block)
+    fh.write("\n# Added by gemini-sidecar install.sh\n" + block)
 PY
   echo "   Appended to $cfg. Copy codex/AGENTS.md into a project to guide tool use."
 }

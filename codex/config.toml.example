@@ -6,7 +6,7 @@
 
 [mcp_servers.gemini4]
 command = "python3"
-args = ["/absolute/path/to/gemini4-harness-kit/plugins/gemini/mcp/gemini4_mcp_server.py"]
+args = ["/absolute/path/to/gemini-sidecar/plugins/gemini/mcp/gemini4_mcp_server.py"]
 startup_timeout_sec = 20
 # Security audits and large refactors on gemini-4-argon can take several minutes.
 tool_timeout_sec = 900

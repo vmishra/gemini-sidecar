@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 220" width="1120" height="220" role="img" aria-labelledby="hero-title hero-desc">
-  <title id="hero-title">gemini4-harness-kit</title>
+  <title id="hero-title">gemini-sidecar</title>
   <desc id="hero-desc">Gemini tools for Claude Code, Codex CLI and Cursor: offload large reads, security audits, reviews and long generations to Gemini without switching your agent's model.</desc>
   <defs>
     <clipPath id="card"><rect x="4" y="4" width="1112" height="212" rx="16"/></clipPath>
@@ -11,7 +11,7 @@
     <rect x="560" y="4" width="278" height="7" fill="#FBBC04"/>
     <rect x="838" y="4" width="278" height="7" fill="#34A853"/>
   </g>
-  <text x="44" y="78" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="40" font-weight="700" fill="#202124">gemini4-harness-kit</text>
+  <text x="44" y="78" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="40" font-weight="700" fill="#202124">gemini-sidecar</text>
   <text x="44" y="116" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="18" fill="#3C4043">Hand the heavy reading and writing to Gemini. Keep your coding agent.</text>
   <text x="44" y="146" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="15" fill="#5F6368">Claude Code plugin, Codex CLI and Cursor MCP server, and an optional local gateway.</text>
   <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13" fill="#1A73E8">

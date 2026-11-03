@@ -5,8 +5,8 @@
   "author": {
     "name": "Vikas Mishra"
   },
-  "homepage": "https://github.com/vmishra/gemini4-harness-kit",
-  "repository": "https://github.com/vmishra/gemini4-harness-kit",
+  "homepage": "https://github.com/vmishra/gemini-sidecar",
+  "repository": "https://github.com/vmishra/gemini-sidecar",
   "license": "Apache-2.0",
   "keywords": ["gemini", "gemini-4-argon", "gemini-3.8-flash", "mcp", "code-review", "security", "antigravity"],
   "userConfig": {

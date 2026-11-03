@@ -1,0 +1,26 @@
+# Changelog
+
+## 2.0.0 (2026-11-03)
+
+First release as `gemini-sidecar` (previously `gemini4-harness-kit`).
+
+### Added
+- Claude Code plugin `gemini` with nine commands: `/gemini:analyze`, `security-audit`, `review`, `refactor`, `test-gen`, `test-triage`, `docs`, `ask-antigravity`, `status`.
+- MCP tools `gemini4_review_diff` and `gemini4_triage_failures`.
+- Subagents `gemini-explorer` and `gemini-implementer`.
+- Real token usage and cost reporting, from the API's usage data.
+- Offline test suite for the MCP server and the gateway.
+
+### Security
+- File reads are confined to the workspace. They follow `.gitignore`, never read secret files or `.git/`, and redact common token formats.
+- Generated files are written only to `.gemini4-staging/`. Paths into `.git/` and symlinked staging folders are refused.
+- Gateway: a token is required on every endpoint except `/health`, browser requests are rejected (`Origin`/`Host` checks), request size is limited, and the API key is sent in a header.
+- The Antigravity CLI runs on redacted copies of the approved files, with a scrubbed environment.
+- Six issues found by running the security audit on this repository were fixed.
+
+### Changed
+- Codex CLI and Cursor integrate through the MCP server.
+- The gateway forwards Anthropic requests unchanged and never reroutes a conversation based on prompt content.
+
+### Removed
+- The claude-code-router worker, the Codex profile and agent files, and the OpenAI-compatible gateway endpoints. They did not work as documented.
