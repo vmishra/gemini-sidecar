@@ -1,0 +1,57 @@
+{
+  "name": "gemini",
+  "version": "2.0.0",
+  "description": "Offload codebase analysis, security audits, diff review, large refactors, test generation and test triage to Gemini through a local MCP server. Files are read from disk on the server side; only the answer returns to Claude Code.",
+  "author": {
+    "name": "Vikas Mishra"
+  },
+  "homepage": "https://github.com/vmishra/gemini4-harness-kit",
+  "repository": "https://github.com/vmishra/gemini4-harness-kit",
+  "license": "Apache-2.0",
+  "keywords": ["gemini", "gemini-4-argon", "gemini-3.8-flash", "mcp", "code-review", "security", "antigravity"],
+  "userConfig": {
+    "gemini_api_key": {
+      "type": "string",
+      "title": "Gemini API key",
+      "description": "Paid Gemini API key from Google AI Studio. Leave empty to use Vertex AI or the GEMINI_API_KEY environment variable.",
+      "sensitive": true,
+      "default": ""
+    },
+    "use_vertex": {
+      "type": "boolean",
+      "title": "Use Vertex AI",
+      "description": "Call Gemini through Vertex AI with gcloud Application Default Credentials instead of an API key.",
+      "default": false
+    },
+    "gcp_project": {
+      "type": "string",
+      "title": "Google Cloud project ID",
+      "description": "Required when Vertex AI is enabled (or set GOOGLE_CLOUD_PROJECT).",
+      "default": ""
+    },
+    "primary_model": {
+      "type": "string",
+      "title": "Pro model",
+      "description": "Used for security audits, reviews, refactors and deep analysis.",
+      "default": "gemini-4-argon"
+    },
+    "subagent_model": {
+      "type": "string",
+      "title": "Flash model",
+      "description": "Used for default analysis and test triage.",
+      "default": "gemini-3.8-flash"
+    },
+    "background_model": {
+      "type": "string",
+      "title": "Flash-Lite model",
+      "description": "Used when analysis is requested with model_tier flash-lite.",
+      "default": "gemini-3.5-flash-lite"
+    },
+    "security_model": {
+      "type": "string",
+      "title": "Security model override (optional)",
+      "description": "Model ID for security audits if different from the Pro model, for example a gated model your project has access to.",
+      "default": ""
+    }
+  }
+}

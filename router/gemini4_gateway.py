@@ -1,87 +1,155 @@
 #!/usr/bin/env python3
 """
-Gemini 4 Multi-Protocol Coexistence Gateway (v1.3 — Nov 2026 Spec)
-==================================================================
-Zero-dependency Python 3 HTTP gateway (default `http://127.0.0.1:3456`) implementing
-cache-preserving coexistence and protocol translation across:
+Local Anthropic Messages API gateway for running Claude Code turns on Gemini.
 
-1. Claude Code v2.1.302+ (`/v1/messages`, `/anthropic/v1/messages`, `/v1/messages/count_tokens`)
-   - `GET /v1/models` exposes `claude-*` virtual IDs (`claude-opus-5-5`, `claude-sonnet-5-5`,
-     `claude-gemini-4-argon`, `claude-gemini-3.8-flash`, `claude-gemini-3.5-flash-lite`,
-     `claude-auto-gemini`) so Claude Code's `/model` picker filter retains Gemini tiers.
-   - Extracts `role: "system"` entries embedded inside `messages[]` (Claude Code v2.1.301+
-     wire behavior) alongside top-level `system`.
-   - Polyfills `POST /v1/messages/count_tokens` (`200 OK`) across `system`, `tools`, and `messages`.
-   - Strips `[1m]` / `[effort=*]` suffixes and `claude-` / `litellm-` prefixes cleanly.
-   - Polyfills `--permission-mode auto` (`safeguards` -> `safeguard_results` on `message_delta`
-     via `gemini-3.5-flash-lite`).
-   - Polyfills server-side `context_management` compaction via `gemini-3.8-flash`.
-   - Emits short regex-safe `toolu_*` IDs (`^[a-zA-Z0-9_-]+$`) and vaults `thoughtSignature`
-     in a bounded LRU map (with `"skip_thought_signature_validator"` fallback on unrecorded first
-     function calls).
-   - Enforces Oct 27, 2026 `gemini-4-argon` parameters (`maxOutputTokens = 65536`,
-     `timeout = 1200s`, omits `temperature`/`top_p`/`top_k`/`cachedContent`).
+Listens on 127.0.0.1:3456 (override with GEMINI4_GATEWAY_PORT or --port) and is
+intended to be used as ANTHROPIC_BASE_URL for Claude Code.
 
-2. OpenAI Codex CLI v0.159+ (`/v1/responses`, `/openai/v1/responses`)
-   - `POST /v1/responses` + `GET /v1/models` (`wire_api = "responses"`).
-   - Strips OpenAI-only request fields rejected by Gemini's OpenAI-compatible endpoint
-     (`store`, `metadata`, `prediction`, `prompt_cache_key`, `safety_identifier`, `user`).
-   - Rewrites Codex freeform `apply_patch` into structured `virtual_apply_patch`.
+What it does:
+  - Implements POST /v1/messages, POST /v1/messages/count_tokens and GET /v1/models
+    (also reachable under the /anthropic/ path prefix). GET /health returns a
+    minimal liveness document.
+  - Routes each /v1/messages request either to Gemini (gemini-4-argon,
+    gemini-3.8-flash, gemini-3.5-flash-lite) or to api.anthropic.com, based on the
+    requested model, a <CCR-SUBAGENT-MODEL> tag in user text, simple keyword
+    heuristics and a per-session pin.
+  - Translates Anthropic requests to Gemini generateContent and translates the
+    result back, including tool calls, thoughtSignature replay, and a valid
+    Anthropic SSE event sequence for streaming clients. Gemini is called
+    non-streaming; streaming clients receive ping events while waiting.
+  - Proxies requests routed to Anthropic models transparently: the original
+    request body is forwarded unchanged and the upstream response is streamed back
+    byte for byte.
+  - Enforces optional per-session and global spend caps (estimates only).
 
-3. Cursor Enterprise & Multi-Tenant Model Gateway (`/cursor`, `/v1/chat/completions`,
-   `/anthropic/v1/...`, `/openai/v1/...`)
-   - Supports `litellm-gemini-4-argon` and `litellm-gemini-3.8-flash` virtual model IDs.
-   - Mounts `/anthropic/...` and `/openai/...` path prefixes for enterprise proxy routing,
-     emitting `X-Gemini4-Gateway` decision headers, privacy-safe SHA-256 `prompt_digest`
-     traces, and optional `GEMINI4_SESSION_BUDGET_USD` caps.
+What it does not do:
+  - It does not implement the OpenAI Responses or Chat Completions APIs. Those
+    paths return HTTP 501; use the gemini4 MCP server for Codex CLI and Cursor.
+  - It does not stream Gemini tokens incrementally.
+  - count_tokens is a character-based estimate, not an exact count.
+
+Security:
+  - Binds to 127.0.0.1 only. Requests with a Host header other than
+    127.0.0.1:<port>, localhost:<port> or [::1]:<port>, or with any Origin header,
+    are rejected with 403. No CORS headers are sent.
+  - Every endpoint except GET /health requires the gateway token, sent as
+    "x-api-key: <token>" or "Authorization: Bearer <token>" (for Claude Code, set
+    ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY to the token). The token comes from
+    GEMINI4_GATEWAY_TOKEN or ~/.config/gemini4/gateway-token, which is created
+    with mode 0600 on first start if missing.
+  - Prompt text is never logged. Log lines contain a timestamp, a session digest,
+    model, routing rule, token counts and status.
+
+Upstream credentials: GEMINI_API_KEY or GOOGLE_API_KEY (sent as x-goog-api-key),
+or GOOGLE_GENAI_USE_VERTEXAI=true with GOOGLE_CLOUD_PROJECT (token from gcloud);
+ANTHROPIC_UPSTREAM_KEY for Anthropic passthrough.
 """
 
 from __future__ import annotations
 
+import argparse
 import collections
 import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
+import socket
+import ssl
+import subprocess
+import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+VERSION = "2.0.0"
 GATEWAY_PORT = int(os.environ.get("GEMINI4_GATEWAY_PORT", "3456"))
-THOUGHT_VAULT_MAX_ENTRIES = 512
 
-# Session pin table: session_id -> {"model": ..., "turns": int}
-SESSION_PINS: Dict[str, Dict[str, Any]] = {}
+MAX_BODY_BYTES = 32 * 1024 * 1024
+MAX_OUTPUT_TOKENS = 65536
+DEFAULT_MAX_OUTPUT_TOKENS = 8192
+SESSION_MAP_MAX_ENTRIES = 2048
+THOUGHT_VAULT_MAX_ENTRIES = 2048
+PING_INTERVAL_S = 15.0
+VERTEX_TOKEN_TTL_S = 45 * 60
 
-# Per-session cumulative estimated spend (USD) for optional GEMINI4_SESSION_BUDGET_USD guard
-SESSION_SPEND_USD: Dict[str, float] = {}
+ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
+ANTHROPIC_TIMEOUT_S = 600
+GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models/"
 
-# Bounded LRU vault: tool_use_id -> thoughtSignature string
-THOUGHT_SIGNATURE_VAULT: "collections.OrderedDict[str, str]" = collections.OrderedDict()
+MODEL_ID_RE = re.compile(r"^[a-z0-9][a-z0-9.\-]{0,63}$")
+GCP_SEGMENT_RE = re.compile(r"^[a-z0-9][a-z0-9\-]{0,62}$")
 
-# Recent routing trace ring buffer (stores SHA-256 prompt_digest only; never raw prompt text)
-ROUTING_TRACES: List[Dict[str, Any]] = []
+KNOWN_GEMINI_MODELS = frozenset({"gemini-4-argon", "gemini-3.8-flash", "gemini-3.5-flash-lite"})
 
-# Fields rejected with HTTP 400 by generativelanguage.googleapis.com/v1beta/openai
-UNSUPPORTED_OPENAI_FIELDS = frozenset(
-    {
-        "store",
-        "metadata",
-        "prediction",
-        "prompt_cache_key",
-        "safety_identifier",
-        "user",
-        "service_tier",
+NOT_IMPLEMENTED_PREFIXES = ("/v1/responses", "/v1/chat/completions", "/v1/completions", "/cursor", "/openai/")
+NOT_IMPLEMENTED_BODY = {
+    "error": {
+        "type": "not_implemented",
+        "message": (
+            "This gateway only implements the Anthropic Messages API (/v1/messages). "
+            "For Codex CLI and Cursor, use the gemini4 MCP server."
+        ),
     }
-)
+}
 
-SUBAGENT_TAG_RE = re.compile(
-    r"<CCR-SUBAGENT-MODEL>\s*([^<\s]+)\s*</CCR-SUBAGENT-MODEL>", re.IGNORECASE
-)
+
+class BoundedLRU:
+    """Thread-safe OrderedDict with a maximum size; least recently used entries are evicted."""
+
+    def __init__(self, max_entries: int) -> None:
+        self.max_entries = max_entries
+        self.lock = threading.RLock()
+        self._data: "collections.OrderedDict[str, Any]" = collections.OrderedDict()
+
+    def get(self, key: str, default: Any = None) -> Any:
+        with self.lock:
+            if key not in self._data:
+                return default
+            self._data.move_to_end(key)
+            return self._data[key]
+
+    def set(self, key: str, value: Any) -> None:
+        with self.lock:
+            self._data[key] = value
+            self._data.move_to_end(key)
+            while len(self._data) > self.max_entries:
+                self._data.popitem(last=False)
+
+    def pop(self, key: str, default: Any = None) -> Any:
+        with self.lock:
+            return self._data.pop(key, default)
+
+    def clear(self) -> None:
+        with self.lock:
+            self._data.clear()
+
+    def __contains__(self, key: object) -> bool:
+        with self.lock:
+            return key in self._data
+
+    def __len__(self) -> int:
+        with self.lock:
+            return len(self._data)
+
+
+# session_id -> {"model": "provider/model", "turns": int, "failover": bool}
+SESSION_PINS = BoundedLRU(SESSION_MAP_MAX_ENTRIES)
+# session_id -> {"settled": float, "reserved": float}
+SESSION_SPEND_USD = BoundedLRU(SESSION_MAP_MAX_ENTRIES)
+# tool_use_id -> Gemini thoughtSignature
+THOUGHT_SIGNATURE_VAULT = BoundedLRU(THOUGHT_VAULT_MAX_ENTRIES)
+
+BUDGET_LOCK = threading.Lock()
+GLOBAL_SPEND_USD = {"settled": 0.0, "reserved": 0.0}
+
+SUBAGENT_TAG_RE = re.compile(r"<CCR-SUBAGENT-MODEL>\s*([^<\s]+)\s*</CCR-SUBAGENT-MODEL>", re.IGNORECASE)
 SECURITY_RE = re.compile(
     r"\b(cve-\d+|cwe-\d+|security\s+audit|vulnerability|auth\s+bypass|sql\s+injection|"
     r"ssrf|xss|race\s+condition|deadlock|taint|cryptograph|privilege\s+escalation)\b",
@@ -92,173 +160,294 @@ LONG_DECODE_RE = re.compile(
     r"monorepo\s+scan|64k|boilerplate\s+for|generate\s+complete|architecture\s+synthesis)\b",
     re.IGNORECASE,
 )
-# Risk floor: prompts matching operational, security, or destructive risk terms
-# never downgrade to the cheapest `flash-lite` tier even when short.
+# Prompts matching these terms are never routed to flash-lite by the auto router.
 RISK_WORDS_RE = re.compile(
     r"\b(production|security|auth|authentication|authorization|crypto|encryption|"
     r"migration|payment|billing|delete|drop\s+table|secret|credential|cve|cwe)\b",
     re.IGNORECASE,
 )
 
-# Per-1M token rates (USD, Nov 2026 schedule) for local session budget accounting
-MODEL_RATES_PER_MTOK: Dict[str, Tuple[float, float]] = {
-    "gemini-4-argon": (2.00, 10.00),
-    "gemini-3.8-flash": (0.75, 3.75),
-    "gemini-3.5-flash-lite": (0.30, 2.50),
-    "claude-opus-5-5": (4.00, 20.00),
-    "claude-sonnet-5-5": (3.00, 15.00),
+# USD per 1M tokens: (input, cached input, output). Used for local budget estimates only.
+# gemini-4-argon list price rises to 4.00 / 0.20 / 20.00 on 2026-12-01.
+# gemini-3.8-flash prices are promotional through 2026-12-31.
+# Override with GEMINI4_PRICES_JSON='{"model": [in, cached, out]}'.
+DEFAULT_PRICES_PER_MTOK: Dict[str, Tuple[float, float, float]] = {
+    "gemini-4-argon": (2.00, 0.10, 10.00),
+    "gemini-3.8-flash": (0.75, 0.075, 3.75),
+    "gemini-3.5-flash-lite": (0.30, 0.03, 2.50),
+    "claude-opus-5-5": (4.00, 0.40, 20.00),
+    "claude-sonnet-5-5": (2.00, 0.20, 10.00),
 }
+# Applied to models missing from the table so that caps err on the high side.
+FALLBACK_PRICE_PER_MTOK = (4.00, 0.40, 20.00)
 
 GATEWAY_MODEL_CATALOG: List[Dict[str, Any]] = [
-    {
-        "id": "claude-gemini-4-argon",
-        "object": "model",
-        "created": 1791849600,
-        "owned_by": "google-gemini4-gateway",
-        "display_name": "Gemini 4 Argon (1M GA Frontier Reasoning & Security)",
-        "context_window": 1048576,
-        "max_output_tokens": 65536,
-    },
-    {
-        "id": "claude-gemini-3.8-flash",
-        "object": "model",
-        "created": 1788307200,
-        "owned_by": "google-gemini4-gateway",
-        "display_name": "Gemini 3.8 Flash (133 tok/s Subagent & SWE Workhorse)",
-        "context_window": 1048576,
-        "max_output_tokens": 65536,
-    },
-    {
-        "id": "claude-gemini-3.5-flash-lite",
-        "object": "model",
-        "created": 1784592000,
-        "owned_by": "google-gemini4-gateway",
-        "display_name": "Gemini 3.5 Flash-Lite (454 tok/s Background & Safeguards)",
-        "context_window": 1048576,
-        "max_output_tokens": 65536,
-    },
-    {
-        "id": "claude-auto-gemini",
-        "object": "model",
-        "created": 1793577600,
-        "owned_by": "google-gemini4-gateway",
-        "display_name": "Gemini Single-Family Complexity Router (Flash-Lite -> 3.8 Flash -> 4 Argon)",
-        "context_window": 1048576,
-        "max_output_tokens": 65536,
-    },
-    {
-        "id": "claude-opus-5-5",
-        "object": "model",
-        "created": 1790812800,
-        "owned_by": "anthropic-passthrough",
-        "display_name": "Claude Opus 5.5 (Hybrid Root Planner)",
-        "context_window": 1000000,
-        "max_output_tokens": 32768,
-    },
-    {
-        "id": "claude-sonnet-5-5",
-        "object": "model",
-        "created": 1790812800,
-        "owned_by": "anthropic-passthrough",
-        "display_name": "Claude Sonnet 5.5 (Hybrid Root Planner)",
-        "context_window": 1000000,
-        "max_output_tokens": 32768,
-    },
+    {"id": "claude-gemini-4-argon", "display_name": "Gemini 4 Argon", "created_at": "2026-10-27T00:00:00Z"},
+    {"id": "claude-gemini-3.8-flash", "display_name": "Gemini 3.8 Flash", "created_at": "2026-09-01T00:00:00Z"},
+    {"id": "claude-gemini-3.5-flash-lite", "display_name": "Gemini 3.5 Flash-Lite", "created_at": "2026-07-20T00:00:00Z"},
+    {"id": "claude-auto-gemini", "display_name": "Gemini auto router (flash-lite / flash / argon)", "created_at": "2026-11-01T00:00:00Z"},
+    {"id": "claude-opus-5-5", "display_name": "Claude Opus 5.5 (Anthropic passthrough)", "created_at": "2026-09-15T00:00:00Z"},
+    {"id": "claude-sonnet-5-5", "display_name": "Claude Sonnet 5.5 (Anthropic passthrough)", "created_at": "2026-09-15T00:00:00Z"},
 ]
+for _entry in GATEWAY_MODEL_CATALOG:
+    _entry["type"] = "model"
 
 
-def _store_thought_signature(tool_id: str, signature: str) -> None:
-    """Insert or refresh a tool_use thoughtSignature in a bounded LRU map."""
-    if not tool_id or not signature:
+class GatewayRequestError(Exception):
+    """Error that maps to an Anthropic-format error response."""
+
+    def __init__(self, status: int, err_type: str, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+        self.err_type = err_type
+        self.message = message
+
+
+def anthropic_error_body(err_type: str, message: str) -> Dict[str, Any]:
+    return {"type": "error", "error": {"type": err_type, "message": message}}
+
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+def session_digest(session_id: Any) -> str:
+    return hashlib.sha256(str(session_id).encode("utf-8")).hexdigest()[:12]
+
+
+def log_event(event: str, **fields: Any) -> None:
+    """Write one JSON log line to stderr. Callers must not pass prompt text."""
+    if (os.environ.get("GEMINI4_GATEWAY_LOG") or "1").strip() == "0":
         return
-    THOUGHT_SIGNATURE_VAULT[tool_id] = signature
-    THOUGHT_SIGNATURE_VAULT.move_to_end(tool_id)
-    while len(THOUGHT_SIGNATURE_VAULT) > THOUGHT_VAULT_MAX_ENTRIES:
-        THOUGHT_SIGNATURE_VAULT.popitem(last=False)
+    allowed = ("session", "requested", "model", "rule", "status", "input_tokens", "cached_tokens", "output_tokens")
+    record: Dict[str, Any] = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "event": event}
+    for key in allowed:
+        if fields.get(key) is not None:
+            record[key] = fields[key]
+    try:
+        sys.stderr.write(json.dumps(record) + "\n")
+        sys.stderr.flush()
+    except (OSError, ValueError):
+        pass
 
 
-def sanitize_openai_compat_payload(body: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
-    """
-    Strip OpenAI-specific fields that cause HTTP 400 errors on Gemini's
-    OpenAI-compatible endpoint (`generativelanguage.googleapis.com/v1beta/openai`).
-    """
-    stripped: List[str] = []
-    cleaned: Dict[str, Any] = {}
-    for k, v in body.items():
-        if k in UNSUPPORTED_OPENAI_FIELDS:
-            stripped.append(k)
-        else:
-            cleaned[k] = v
-    return cleaned, stripped
+# ---------------------------------------------------------------------------
+# Token handling
+# ---------------------------------------------------------------------------
+
+def token_file_path() -> str:
+    return os.path.join(os.path.expanduser("~"), ".config", "gemini4", "gateway-token")
 
 
-def estimate_anthropic_input_tokens(body: Dict[str, Any]) -> int:
-    """Estimate input tokens across top-level `system`, `tools`, and `messages`."""
-    total_chars = 0
-    if body.get("system"):
-        total_chars += len(json.dumps(body["system"]))
-    if body.get("tools"):
-        total_chars += len(json.dumps(body["tools"]))
-    if body.get("messages"):
-        total_chars += len(json.dumps(body["messages"]))
-    return max(1, total_chars // 4)
-
-
-def check_and_record_budget(
-    session_id: str, selected_model: str, input_tokens: int, output_tokens: int = 512
-) -> Tuple[bool, float, Optional[float]]:
-    """
-    Track cumulative session spend and enforce `GEMINI4_SESSION_BUDGET_USD` when set.
-    Returns `(allowed, projected_session_usd, configured_cap_usd)`.
-    """
-    raw_cap = (os.environ.get("GEMINI4_SESSION_BUDGET_USD") or "").strip()
-    cap_usd: Optional[float] = None
-    if raw_cap:
+def load_or_create_token() -> Tuple[str, Optional[str], bool]:
+    """Return (token, file_path_or_None, created). The token itself is never printed."""
+    env_token = (os.environ.get("GEMINI4_GATEWAY_TOKEN") or "").strip()
+    if env_token:
+        return env_token, None, False
+    path = token_file_path()
+    for _ in range(2):
         try:
-            cap_usd = float(raw_cap)
-        except ValueError:
-            cap_usd = None
+            with open(path, "r", encoding="utf-8") as fh:
+                token = fh.read().strip()
+            if not token:
+                raise RuntimeError(f"Gateway token file {path} is empty; delete it to regenerate.")
+            return token, path, False
+        except FileNotFoundError:
+            pass
+        os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+        token = secrets.token_urlsafe(32)
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            continue  # Created concurrently; read it on the next iteration.
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(token + "\n")
+        return token, path, True
+    raise RuntimeError(f"Could not read or create gateway token file {path}.")
 
-    bare = strip_virtual_wrappers(selected_model.split("/", 1)[-1])
-    in_rate, out_rate = MODEL_RATES_PER_MTOK.get(bare, (1.00, 5.00))
-    call_est = (input_tokens / 1_000_000.0) * in_rate + (output_tokens / 1_000_000.0) * out_rate
-    prior = SESSION_SPEND_USD.get(session_id, 0.0)
-    projected = round(prior + call_est, 6)
 
-    if cap_usd is not None and projected > cap_usd:
-        return False, projected, cap_usd
-
-    SESSION_SPEND_USD[session_id] = projected
-    return True, projected, cap_usd
+def token_matches(presented: str, expected: str) -> bool:
+    return hmac.compare_digest(presented.encode("utf-8"), expected.encode("utf-8"))
 
 
-def resolve_security_target() -> str:
-    """Return GA `gemini/gemini-4-argon` today, or Fairwind `Gemini 4 Carbon` if configured."""
-    fairwind = (os.environ.get("GEMINI4_FAIRWIND_CARBON_MODEL") or "").strip()
-    if fairwind:
-        return fairwind if "/" in fairwind else f"gemini/{fairwind}"
-    return "gemini/gemini-4-argon"
-
+# ---------------------------------------------------------------------------
+# Model IDs
+# ---------------------------------------------------------------------------
 
 def strip_virtual_wrappers(model_id: str) -> str:
-    """
-    Strip Claude Code `[1m]` / `[effort=*]` suffixes and gateway discovery prefixes
-    (`claude-gemini-*`, `litellm-gemini-*`) while keeping native `claude-opus-*` intact.
-    """
+    """Remove `[1m]`-style suffixes and `claude-gemini-` / `litellm-` discovery prefixes."""
     cleaned = re.sub(r"\[[^\]]*\]", "", (model_id or "").strip())
     lower = cleaned.lower()
     if lower.startswith("claude-gemini-"):
-        return cleaned[len("claude-") :]
-    if lower.startswith("litellm-gemini-"):
-        return cleaned[len("litellm-") :]
+        return cleaned[len("claude-"):]
     if lower.startswith("litellm-"):
-        return cleaned[len("litellm-") :]
+        return cleaned[len("litellm-"):]
     return cleaned
+
+
+def normalize_model_id(model_id: str) -> str:
+    return strip_virtual_wrappers(model_id).strip().lower()
+
+
+def is_valid_model_id(model_id: str) -> bool:
+    return bool(MODEL_ID_RE.match(model_id or ""))
+
+
+def _security_model() -> Optional[str]:
+    """Optional model override for security-classified prompts (GEMINI4_SECURITY_MODEL)."""
+    raw = (os.environ.get("GEMINI4_SECURITY_MODEL") or "").strip()
+    if not raw:
+        return None
+    if raw.lower().startswith("gemini/"):
+        raw = raw[len("gemini/"):]
+    return normalize_model_id(raw)
+
+
+def allowed_gemini_models() -> frozenset:
+    extra = _security_model()
+    if extra and is_valid_model_id(extra):
+        return KNOWN_GEMINI_MODELS | {extra}
+    return KNOWN_GEMINI_MODELS
+
+
+def resolve_security_target() -> str:
+    """Return the model used for security-classified prompts."""
+    override = _security_model()
+    if override and is_valid_model_id(override):
+        return f"gemini/{override}"
+    return "gemini/gemini-4-argon"
+
+
+def resolve_gemini_model(raw: str) -> str:
+    """Normalize and validate a Gemini model name; raise GatewayRequestError if unknown."""
+    model = normalize_model_id(raw)
+    if not is_valid_model_id(model):
+        raise GatewayRequestError(400, "invalid_request_error", "Invalid model identifier.")
+    if model not in allowed_gemini_models():
+        raise GatewayRequestError(400, "invalid_request_error", f"Unknown Gemini model: {model}")
+    return model
+
+
+def parse_selected_model(selected: str) -> Tuple[str, str]:
+    """Split "provider/model" and validate the model ID before it is used upstream."""
+    provider, sep, model = (selected or "").partition("/")
+    if not sep or provider not in ("gemini", "anthropic"):
+        raise GatewayRequestError(400, "invalid_request_error", "Invalid model identifier.")
+    if provider == "gemini":
+        return provider, resolve_gemini_model(model)
+    model = normalize_model_id(model)
+    if not is_valid_model_id(model):
+        raise GatewayRequestError(400, "invalid_request_error", "Invalid model identifier.")
+    return provider, model
+
+
+def parse_subagent_tag(raw_tag: str) -> str:
+    """Convert a <CCR-SUBAGENT-MODEL> value ("gemini,model", "gemini/model" or "model")."""
+    value = raw_tag.strip().replace(",", "/", 1)
+    if "/" in value:
+        provider, _, model = value.partition("/")
+        if provider.strip().lower() != "gemini":
+            raise GatewayRequestError(400, "invalid_request_error", "Invalid <CCR-SUBAGENT-MODEL> value.")
+        value = model
+    if "/" in value:
+        raise GatewayRequestError(400, "invalid_request_error", "Invalid <CCR-SUBAGENT-MODEL> value.")
+    return "gemini/" + resolve_gemini_model(value)
+
+
+# ---------------------------------------------------------------------------
+# Message helpers
+# ---------------------------------------------------------------------------
+
+def _extract_text_from_content(raw_content: Any) -> str:
+    """Join plain string content and `type: text` blocks; other block types are ignored."""
+    if isinstance(raw_content, str):
+        return raw_content
+    if isinstance(raw_content, list):
+        chunks = []
+        for item in raw_content:
+            if isinstance(item, str):
+                chunks.append(item)
+            elif isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text"), str):
+                chunks.append(item["text"])
+        return "\n".join(chunks)
+    return ""
+
+
+def find_subagent_tag(messages: List[Any]) -> Optional[str]:
+    """Return the raw tag value from the first or last user message text, if present.
+
+    tool_result blocks and assistant messages are not inspected, so tool output
+    cannot switch models.
+    """
+    user_msgs = [m for m in messages if isinstance(m, dict) and m.get("role") == "user"]
+    candidates = user_msgs[:1] + user_msgs[-1:] if user_msgs else []
+    for msg in candidates:
+        match = SUBAGENT_TAG_RE.search(_extract_text_from_content(msg.get("content")))
+        if match:
+            return match.group(1)
+    return None
+
+
+def estimate_anthropic_input_tokens(body: Dict[str, Any]) -> int:
+    """Estimate input tokens (chars / 4) across `system`, `tools` and `messages`."""
+    total_chars = 0
+    for key in ("system", "tools", "messages"):
+        if body.get(key):
+            total_chars += len(json.dumps(body[key], default=str))
+    return max(1, total_chars // 4)
+
+
+def derive_session_id(body: Dict[str, Any], headers: Any = None) -> str:
+    """Pick a session key for pinning and budgets.
+
+    Claude Code sends metadata.user_id, which includes a per-session identifier in
+    current versions. Task subagents share the parent's value and there is no
+    explicit subagent flag, so subagent requests cannot be told apart reliably.
+    """
+    meta = body.get("metadata")
+    if isinstance(meta, dict):
+        uid = meta.get("user_id")
+        if uid is not None and str(uid).strip():
+            return str(uid)[:256]
+    if headers is not None:
+        hdr = headers.get("x-session-id")
+        if hdr and str(hdr).strip():
+            return str(hdr)[:256]
+    messages = body.get("messages") if isinstance(body.get("messages"), list) else []
+    first = next((m for m in messages if isinstance(m, dict) and m.get("role") != "system"), None)
+    material = json.dumps({"system": body.get("system"), "first": first, "metadata": meta}, sort_keys=True, default=str)
+    return "anon-" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
+
+
+# ---------------------------------------------------------------------------
+# Routing
+# ---------------------------------------------------------------------------
+
+def _pin_if_absent(session_id: str, model: str, turns: int) -> bool:
+    with SESSION_PINS.lock:
+        if session_id in SESSION_PINS:
+            return False
+        SESSION_PINS.set(session_id, {"model": model, "turns": turns, "failover": False})
+        return True
+
+
+def pin_failover(session_id: str, model: str, turns: int) -> None:
+    SESSION_PINS.set(str(session_id), {"model": model, "turns": turns, "failover": True})
+
+
+def _decision(target: str, rule: str, reason: str, pinned: bool, digest: str) -> Dict[str, Any]:
+    return {
+        "selected_model": target,
+        "rule_matched": rule,
+        "reason": reason,
+        "session_pinned": pinned,
+        "prompt_digest": digest,
+    }
 
 
 def classify_and_route(
     *,
-    session_id: str,
+    session_id: Any,
     requested_model: str,
     messages: List[Dict[str, Any]],
     token_count_est: int,
@@ -267,1141 +456,1088 @@ def classify_and_route(
     subagent_flag: bool = False,
     simulate_429_primary: bool = False,
 ) -> Dict[str, Any]:
-    """
-    Core Cache-Aware Coexistence Router (shared by HTTP gateway & Web Studio).
-    """
-    unwrapped = strip_virtual_wrappers(requested_model or "")
-    req_lower = unwrapped.lower()
-    non_system_msgs = [m for m in messages if isinstance(m, dict) and m.get("role") != "system"]
-    turn_count = len(non_system_msgs)
-    last_content = ""
-    if non_system_msgs:
-        raw_last = non_system_msgs[-1].get("content", "")
-        last_content = raw_last if isinstance(raw_last, str) else json.dumps(raw_last)
+    """Choose an upstream "provider/model" for a request.
 
-    prompt_digest = hashlib.sha256(last_content.encode("utf-8")).hexdigest()[:16]
-    all_text_head = json.dumps(non_system_msgs[:2]) if non_system_msgs else ""
+    Rules, in order: subagent tag, haiku/background, auto router (the only rule that
+    looks at prompt content), explicit Gemini model, 429 failover, subagent flag,
+    existing pin, then Anthropic passthrough or a Gemini default. `has_safeguards` is accepted for compatibility and ignored.
+    Raises GatewayRequestError for unknown or invalid model IDs.
+    """
+    session_id = str(session_id)
+    unwrapped = normalize_model_id(requested_model or "")
+    non_system = [m for m in messages if isinstance(m, dict) and m.get("role") != "system"]
+    turn_count = len(non_system)
+    last_text = _extract_text_from_content(non_system[-1].get("content")) if non_system else ""
+    digest = hashlib.sha256(last_text.encode("utf-8")).hexdigest()[:16]
     sec_target = resolve_security_target()
 
-    # 1. Explicit `<CCR-SUBAGENT-MODEL>` tag (isolated subagent context -> zero parent cache break)
-    tag_match = SUBAGENT_TAG_RE.search(last_content) or SUBAGENT_TAG_RE.search(all_text_head)
-    if tag_match:
-        raw_tag = strip_virtual_wrappers(tag_match.group(1).strip().replace(",", "/"))
-        if raw_tag in ("gemini/gemini-4-carbon", "gemini-4-carbon") and not os.environ.get(
-            "GEMINI4_FAIRWIND_CARBON_MODEL"
-        ):
-            target = "gemini/gemini-4-argon"
-            carbon_note = " (mapped Fairwind `gemini-4-carbon` tag -> GA `gemini-4-argon`; set `GEMINI4_FAIRWIND_CARBON_MODEL` when enrolled)"
+    # 1. Explicit subagent tag in user text.
+    raw_tag = find_subagent_tag(messages)
+    if raw_tag is not None:
+        target = parse_subagent_tag(raw_tag)
+        return _decision(target, "ccr_subagent_tag", "Subagent model tag in user text.", False, digest)
+
+    # Note: compaction requests are not special-cased: Claude Code sends `context_management` on
+    # ordinary turns too, so routing on it would move a pinned root thread to another provider.
+    del is_summary
+
+    # 2. Haiku-class background calls.
+    if "haiku" in unwrapped or unwrapped == "gemini-3.5-flash-lite":
+        return _decision("gemini/gemini-3.5-flash-lite", "background_haiku_flash_lite",
+                         "Haiku-class request routed to gemini-3.5-flash-lite.", False, digest)
+
+    # 3. Auto router within the Gemini family, with a risk-word floor.
+    if unwrapped in ("claude-auto-gemini", "auto-gemini"):
+        has_risk = bool(RISK_WORDS_RE.search(last_text))
+        if SECURITY_RE.search(last_text):
+            target, tier = sec_target, "security"
+        elif token_count_est > 150_000 or LONG_DECODE_RE.search(last_text):
+            target, tier = "gemini/gemini-4-argon", "complex"
+        elif len(last_text) < 140 and turn_count <= 2 and not has_risk:
+            target, tier = "gemini/gemini-3.5-flash-lite", "simple"
         else:
-            target = raw_tag if "/" in raw_tag else f"gemini/{raw_tag}"
-            carbon_note = ""
-        decision = {
-            "selected_model": target,
-            "rule_matched": "ccr_subagent_tag",
-            "reason": (
-                f"Detected `<CCR-SUBAGENT-MODEL>` on isolated subagent thread -> `{target}`{carbon_note}. "
-                f"Parent planner prompt cache remains warm."
-            ),
-            "parent_cache_impact": "ZERO_IMPACT (Isolated Subagent Context)",
-            "session_pinned": False,
-            "prompt_digest": prompt_digest,
-            "protocol_fixes_applied": [
-                "Normalized `thinking: {type: adaptive}` -> `thinkingConfig(HIGH)`",
-                "Enforced Oct 27 Argon `maxOutputTokens=65536` & 20m timeout"
-                if "argon" in target
-                else "Enabled `thoughtSignature` vault across tool_use turns",
-            ],
-            "fallback_chain": [target, "gemini/gemini-4-argon", "gemini/gemini-3.8-flash"],
-        }
-        _record_trace(session_id, requested_model, token_count_est, decision)
-        return decision
+            target, tier = "gemini/gemini-3.8-flash", "risk_floor" if has_risk else "medium"
+        return _decision(target, "single_family_complexity_router", f"Auto router tier: {tier}.", False, digest)
 
-    # 2. Server-Side Context Compaction (`context_management` / `is_summary`) -> Gemini 3.8 Flash
-    if is_summary:
-        target = "gemini/gemini-3.8-flash"
-        decision = {
-            "selected_model": target,
-            "rule_matched": "context_management_compaction_flash",
-            "reason": (
-                "Server-side context compaction (`context_management_summary_model`) routed to "
-                "`gemini/gemini-3.8-flash` (133 tok/s, $0.75/M, $0.075/M cached)."
-            ),
-            "parent_cache_impact": "ZERO_IMPACT (Out-of-Band Compaction Summary)",
-            "session_pinned": False,
-            "prompt_digest": prompt_digest,
-            "protocol_fixes_applied": ["Polyfilled `context_management` summary block"],
-            "fallback_chain": ["gemini/gemini-3.8-flash", "gemini/gemini-4-argon"],
-        }
-        _record_trace(session_id, requested_model, token_count_est, decision)
-        return decision
-
-    # 3. Background Loops, Haiku Role & Safeguards Classifier -> Gemini 3.5 Flash-Lite (454 tok/s)
-    if "haiku" in req_lower or "3.5-flash-lite" in req_lower:
-        target = "gemini/gemini-3.5-flash-lite"
-        decision = {
-            "selected_model": target,
-            "rule_matched": "background_haiku_flash_lite",
-            "reason": (
-                "Background loop, file indexing, or `ANTHROPIC_DEFAULT_HAIKU_MODEL` offloaded to "
-                "`gemini/gemini-3.5-flash-lite` (454 tok/s, $0.30/M input)."
-            ),
-            "parent_cache_impact": "ZERO_IMPACT (Isolated Background / Haiku Call)",
-            "session_pinned": False,
-            "prompt_digest": prompt_digest,
-            "protocol_fixes_applied": [
-                "Stripped `claude-` / `[1m]` virtual wrapper",
-                "Attached `safeguard_results` auto-mode polyfill" if has_safeguards else "Low-latency Flash-Lite path",
-            ],
-            "fallback_chain": ["gemini/gemini-3.5-flash-lite", "gemini/gemini-3.8-flash"],
-        }
-        _record_trace(session_id, requested_model, token_count_est, decision)
-        return decision
-
-    # 4. Single-Family Dynamic Complexity Router (`claude-auto-gemini`)
-    # Enforces `RISK_WORDS_RE` floor so security/production/auth/payment prompts never drop to flash-lite.
-    if "auto-gemini" in req_lower:
-        has_risk_word = bool(RISK_WORDS_RE.search(last_content))
-        if token_count_est > 150_000 or SECURITY_RE.search(last_content) or LONG_DECODE_RE.search(last_content):
-            target = sec_target if SECURITY_RE.search(last_content) else "gemini/gemini-4-argon"
-            tier_label = "COMPLEX/REASONING -> gemini-4-argon"
-        elif len(last_content) < 140 and turn_count <= 2 and not has_risk_word:
-            target = "gemini/gemini-3.5-flash-lite"
-            tier_label = "SIMPLE -> gemini-3.5-flash-lite"
-        else:
-            target = "gemini/gemini-3.8-flash"
-            tier_label = (
-                "RISK_FLOOR_GUARD -> gemini-3.8-flash"
-                if has_risk_word and len(last_content) < 140
-                else "MEDIUM -> gemini-3.8-flash"
-            )
-        decision = {
-            "selected_model": target,
-            "rule_matched": "single_family_complexity_router",
-            "reason": (
-                f"`claude-auto-gemini` single-family classifier selected `{tier_label}` (<1ms overhead). "
-                f"Keeps `tool_use.id` and `thought_signature` inside the Gemini family (97.4%-99.3% warm cache hit rate)."
-            ),
-            "parent_cache_impact": "GEMINI_95PCT_IMPLICIT_CACHE (Single-Family Warm Prefix)",
-            "session_pinned": False,
-            "prompt_digest": prompt_digest,
-            "protocol_fixes_applied": [
-                "Single-family `tool_use.id` continuity (`^[a-zA-Z0-9_-]+$`)",
-                "Preserved `thoughtSignature` vault across tier escalations",
-            ],
-            "fallback_chain": [target, "gemini/gemini-3.8-flash", "gemini/gemini-4-argon"],
-        }
-        _record_trace(session_id, requested_model, token_count_est, decision)
-        return decision
-
-    # 5. Explicit Gemini Model Requested (via Role Env Var Pinning, Codex Agent, or Cursor `/cursor`)
-    if any(g in req_lower for g in ("gemini-4-argon", "gemini-3.8-flash", "gemini-4-carbon")):
-        if "gemini-4-carbon" in req_lower and not os.environ.get("GEMINI4_FAIRWIND_CARBON_MODEL"):
-            clean = "gemini/gemini-4-argon"
-        else:
-            clean = req_lower if "/" in req_lower else f"gemini/{req_lower}"
-        fixes = [
-            "Stripped `claude-` / `[1m]` virtual discovery wrapper",
-            "Enabled `thoughtSignature` continuity & regex-safe `toolu_*` IDs",
-        ]
-        if "argon" in clean or "carbon" in clean:
-            fixes.append("Enforced Oct 27 Argon `maxOutputTokens=65536`, 20m timeout & dropped `temperature`")
-        decision = {
-            "selected_model": clean,
-            "rule_matched": "explicit_gemini_role_or_agent",
-            "reason": (
-                f"Role env var (`CLAUDE_CODE_SUBAGENT_MODEL` / `ANTHROPIC_DEFAULT_*`) or harness agent "
-                f"pinned request directly to `{clean}`."
-            ),
-            "parent_cache_impact": "GEMINI_95PCT_IMPLICIT_CACHE ($0 write fee, >=4,096 tok)",
-            "session_pinned": not subagent_flag,
-            "prompt_digest": prompt_digest,
-            "protocol_fixes_applied": fixes,
-            "fallback_chain": [clean, "gemini/gemini-3.8-flash"],
-        }
+    # 4. Explicit Gemini model.
+    if unwrapped.startswith("gemini"):
+        target = "gemini/" + resolve_gemini_model(unwrapped)
+        pinned = False
         if not subagent_flag:
-            SESSION_PINS[session_id] = {"model": clean, "turns": turn_count}
-        _record_trace(session_id, requested_model, token_count_est, decision)
-        return decision
+            pinned = _pin_if_absent(session_id, target, turn_count)
+        return _decision(target, "explicit_gemini_role_or_agent", "Gemini model requested explicitly.", pinned, digest)
 
-    # 6. Simulated or Live Primary 429 / 5-Hour Lockout Failover -> Sticky Pin to Gemini 4 Argon
+    # 5. Primary provider quota failure: pin the session to Gemini.
     if simulate_429_primary:
         target = "gemini/gemini-4-argon"
-        SESSION_PINS[session_id] = {"model": target, "turns": turn_count, "failover": True}
-        decision = {
-            "selected_model": target,
-            "rule_matched": "sticky_quota_failover_429",
-            "reason": (
-                "Primary provider returned HTTP 429 / 5-hour quota lockout. Failed over to "
-                "`gemini/gemini-4-argon` and sticky-pinned `session_id` so subsequent turns "
-                "hit Gemini's 95% implicit cache ($0.10/M) instead of flapping."
-            ),
-            "parent_cache_impact": "STICKY_FAILOVER_PINNED (Prevents Flap Penalty)",
-            "session_pinned": True,
-            "prompt_digest": prompt_digest,
-            "protocol_fixes_applied": [
-                "Stripped incompatible Anthropic thinking block signatures",
-                "Enforced Oct 27 Argon `maxOutputTokens=65536` & 20m timeout",
-            ],
-            "fallback_chain": ["gemini/gemini-4-argon", "gemini/gemini-3.8-flash"],
-        }
-        _record_trace(session_id, requested_model, token_count_est, decision)
-        return decision
+        pin_failover(session_id, target, turn_count)
+        return _decision(target, "sticky_quota_failover_429", "Primary provider returned 429; session pinned to Gemini.", True, digest)
 
-    # 7. Subagent Flagged Request (e.g., Claude Code Task / Codex explorer / CCR subagent)
+    # 6. Caller-supplied subagent flag (not sent by Claude Code itself).
     if subagent_flag:
-        if SECURITY_RE.search(last_content):
-            target = sec_target
-            rule = "subagent_security_argon"
-            reason = (
-                f"Isolated subagent matched CWE/CVE security intent -> routed to `{target}` "
-                f"(tied #1 Cursor Agent Security League; CVE-2021-29488 & CVE-2015-8749)."
-            )
-        elif token_count_est > 150_000 or LONG_DECODE_RE.search(last_content):
-            target = "gemini/gemini-4-argon"
-            rule = "subagent_deep_argon"
-            reason = "Isolated subagent matched >150K context / multi-file migration -> `gemini/gemini-4-argon`."
+        if SECURITY_RE.search(last_text):
+            target, rule = sec_target, "subagent_security_argon"
+        elif token_count_est > 150_000 or LONG_DECODE_RE.search(last_text):
+            target, rule = "gemini/gemini-4-argon", "subagent_deep_argon"
         else:
-            target = "gemini/gemini-3.8-flash"
-            rule = "subagent_workhorse_flash"
-            reason = (
-                "Routine exploration/test subagent offloaded to `gemini/gemini-3.8-flash` "
-                "(133 tok/s, $0.75/M, 89.4% Terminal-Bench 2.1 — reduces subagent spend by 83%)."
-            )
-        decision = {
-            "selected_model": target,
-            "rule_matched": rule,
-            "reason": reason,
-            "parent_cache_impact": "ZERO_IMPACT (Isolated Subagent Context)",
-            "session_pinned": False,
-            "prompt_digest": prompt_digest,
-            "protocol_fixes_applied": ["Isolated subagent `tool_use.id` & `thoughtSignature` state"],
-            "fallback_chain": [target, "gemini/gemini-3.8-flash", "gemini/gemini-4-argon"],
-        }
-        _record_trace(session_id, requested_model, token_count_est, decision)
-        return decision
+            target, rule = "gemini/gemini-3.8-flash", "subagent_workhorse_flash"
+        return _decision(target, rule, "Subagent request.", False, digest)
 
-    # 8. Existing Multi-Turn Root Session -> STRICT SESSION PINNING
-    if turn_count > 2 and session_id in SESSION_PINS:
-        pinned = SESSION_PINS[session_id]["model"]
-        SESSION_PINS[session_id]["turns"] = turn_count
-        decision = {
-            "selected_model": pinned,
-            "rule_matched": "session_pinned_cache_guard",
-            "reason": (
-                f"Multi-turn root session (`turn={turn_count}`) is pinned to `{pinned}`. "
-                f"Refusing mid-thread cross-provider switch even if keywords match—preventing "
-                f"$5.00/M Opus 5.5 cache-write invalidation and 728-char `tool_use.id` regex 400 errors. "
-                f"(Delegate heavy subtasks via subagents or `gemini4_*` MCP file-pointer tools.)"
-            ),
-            "parent_cache_impact": "100%_CACHE_PRESERVED (Mid-Thread Switch Blocked)",
-            "session_pinned": True,
-            "prompt_digest": prompt_digest,
-            "protocol_fixes_applied": ["Enforced root session provider & prefix cache affinity"],
-            "fallback_chain": [pinned, "gemini/gemini-4-argon", "gemini/gemini-3.8-flash"],
-        }
-        _record_trace(session_id, requested_model, token_count_est, decision)
-        return decision
+    # 7. Existing pin. Failover pins apply from turn 1 because the primary is unavailable.
+    with SESSION_PINS.lock:
+        pin = SESSION_PINS.get(session_id)
+        if pin is not None and (turn_count > 2 or pin.get("failover")):
+            pin["turns"] = turn_count
+            target = pin["model"]
+            return _decision(target, "session_pinned_cache_guard", "Session pinned to keep one provider per thread.", True, digest)
 
-    # 9. Fresh Root Thread (turn <= 2) Dynamic Turn-1 Classification
-    if token_count_est > 150_000:
-        target = "gemini/gemini-4-argon"
-        rule = "long_context_1m_threshold"
-        reason = (
-            f"Turn-1 input (~{token_count_est:,} tokens) exceeds 150K threshold. Pinning thread to "
-            f"`gemini/gemini-4-argon` (1,048,576 window, 95% implicit cache at $0.10/M intro)."
-        )
-        cache_note = "GEMINI_95PCT_IMPLICIT_CACHE ($0 write fee)"
-    elif SECURITY_RE.search(last_content):
-        target = sec_target
-        rule = "security_cwe_classifier"
-        reason = (
-            f"Fresh thread matched CWE/CVE security intent -> pinned at Turn 1 to `{target}` "
-            f"(tied #1 Cursor Agent Security League; 1-line Fairwind Carbon ready)."
-        )
-        cache_note = "PINNED_AT_TURN_1_TO_ARGON"
-    elif LONG_DECODE_RE.search(last_content):
-        target = "gemini/gemini-4-argon"
-        rule = "long_decode_swe_classifier"
-        reason = (
-            "Fresh thread matched large migration / 64K-decode intent -> pinned at Turn 1 to "
-            "`gemini/gemini-4-argon` (`maxOutputTokens=65536`, 20m reasoning timeout)."
-        )
-        cache_note = "PINNED_AT_TURN_1_TO_ARGON"
+    # 8. Any other model ID (Anthropic models, or Claude Code background calls that name a fixed
+    # model). Honour the user's choice: forward to Anthropic when an upstream key is configured,
+    # otherwise use a fast Gemini default. No keyword-based rerouting happens here, so a root
+    # thread is never moved to another model because of what the prompt says.
+    if (os.environ.get("ANTHROPIC_UPSTREAM_KEY") or "").strip():
+        target, rule = "anthropic/" + (unwrapped or "claude-opus-5-5"), "anthropic_passthrough"
     else:
-        default_root = unwrapped or "claude-opus-5-5"
-        if "/" not in default_root:
-            default_root = f"anthropic/{default_root}"
-        target = default_root
-        rule = "root_planner_pinned"
-        reason = (
-            f"Interactive root planning turn stays pinned to `{target}` for warm prefix caching "
-            f"while `gemini-3.8-flash` subagents and `gemini-3.5-flash-lite` background loops absorb 80%+ of token volume."
-        )
-        cache_note = "ROOT_ANTHROPIC_CACHE_WARM"
-
-    SESSION_PINS[session_id] = {"model": target, "turns": max(1, turn_count)}
-
-    decision = {
-        "selected_model": target,
-        "rule_matched": rule,
-        "reason": reason,
-        "parent_cache_impact": cache_note,
-        "session_pinned": True,
-        "prompt_digest": prompt_digest,
-        "protocol_fixes_applied": [
-            "Enforced Oct 27 Argon `maxOutputTokens=65536` & `thinkingConfig(HIGH)`"
-            if target.startswith("gemini/")
-            else "Passthrough native Anthropic headers + `[1m]` stripped",
-        ],
-        "fallback_chain": [
-            target,
-            "gemini/gemini-4-argon",
-            "gemini/gemini-3.8-flash",
-        ],
-    }
-    _record_trace(session_id, requested_model, token_count_est, decision)
-    return decision
+        fallback = normalize_model_id(os.environ.get("GEMINI4_UNMAPPED_MODEL") or "gemini-3.8-flash")
+        target, rule = "gemini/" + resolve_gemini_model(fallback), "unmapped_model_default"
+    pinned = _pin_if_absent(session_id, target, max(1, turn_count))
+    return _decision(target, rule, "Model not mapped to a Gemini tier.", pinned, digest)
 
 
-def _record_trace(
-    session_id: str, requested_model: str, token_count_est: int, decision: Dict[str, Any]
-) -> None:
-    ROUTING_TRACES.append(
-        {
-            "timestamp": time.strftime("%H:%M:%S"),
-            "session_id": session_id,
-            "requested_model": requested_model,
-            "token_count_est": token_count_est,
-            **decision,
-        }
-    )
-    if len(ROUTING_TRACES) > 50:
-        del ROUTING_TRACES[:-50]
+# ---------------------------------------------------------------------------
+# Anthropic -> Gemini translation
+# ---------------------------------------------------------------------------
+
+def resolve_max_output_tokens(body: Dict[str, Any]) -> int:
+    """Use the client's max_tokens, capped at MAX_OUTPUT_TOKENS."""
+    value = body.get("max_tokens")
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return min(value, MAX_OUTPUT_TOKENS)
+    return DEFAULT_MAX_OUTPUT_TOKENS
 
 
-def _sanitize_gemini_schema(schema: Any) -> Any:
-    """Strip JSON Schema keys rejected by Gemini's functionDeclarations validator."""
-    if isinstance(schema, dict):
-        blocked = {"$schema", "additionalProperties", "default", "title"}
-        cleaned = {}
-        for k, v in schema.items():
-            if k in blocked:
-                continue
-            cleaned[k] = _sanitize_gemini_schema(v)
-        return cleaned
-    if isinstance(schema, list):
-        return [_sanitize_gemini_schema(item) for item in schema]
-    return schema
+def _store_thought_signature(tool_id: str, signature: str) -> None:
+    if tool_id and signature:
+        THOUGHT_SIGNATURE_VAULT.set(tool_id, signature)
 
 
-def _extract_text_from_content(raw_content: Any) -> str:
-    """Extract plain text from string or Anthropic content block list."""
-    if isinstance(raw_content, str):
-        return raw_content
-    if isinstance(raw_content, list):
-        chunks = []
-        for item in raw_content:
-            if isinstance(item, dict) and item.get("text"):
-                chunks.append(str(item["text"]))
-            elif isinstance(item, str):
-                chunks.append(item)
-        return "\n".join(chunks)
-    return ""
+def translate_anthropic_to_gemini_payload(body: Dict[str, Any], gemini_model_id: str) -> Dict[str, Any]:
+    """Translate an Anthropic Messages request into a Gemini generateContent payload.
 
-
-def translate_anthropic_to_gemini_payload(
-    body: Dict[str, Any], gemini_model_id: str
-) -> Dict[str, Any]:
+    role:"system" entries inside messages are merged into systemInstruction.
+    thinking / redacted_thinking blocks are dropped. temperature, top_p and top_k
+    are not forwarded. Stored thoughtSignatures are replayed on functionCall parts;
+    the first unrecorded functionCall in a turn gets the validator skip sentinel.
     """
-    Translate an Anthropic `/v1/messages` request into Gemini `generateContent` JSON,
-    enforcing all Oct 27, 2026 `gemini-4-argon` mandates and Claude Code v2.1.301+ quirks:
-      - Extracts `role == "system"` items embedded inside `messages[]` into `systemInstruction`
-      - Unified thinking+output pool: `maxOutputTokens = 65536` on Argon/Carbon
-      - `temperature`, `top_p`, `top_k`, and `cachedContent` omitted
-      - `thinkingLevel` (`LOW` for Flash, `HIGH` for Argon/Carbon)
-      - `thoughtSignature` re-attached from LRU vault (or `"skip_thought_signature_validator"`
-        on the step's first unrecorded `functionCall` per Google's Gemini 3.8/4 validator spec)
-    """
+    messages = body.get("messages") if isinstance(body.get("messages"), list) else []
     tool_id_to_name: Dict[str, str] = {}
-    embedded_system_parts: List[str] = []
-
-    for msg in body.get("messages", []):
-        if not isinstance(msg, dict):
-            continue
-        raw_c = msg.get("content", "")
-        if isinstance(raw_c, list):
-            for blk in raw_c:
+    for msg in messages:
+        if isinstance(msg, dict) and isinstance(msg.get("content"), list):
+            for blk in msg["content"]:
                 if isinstance(blk, dict) and blk.get("type") == "tool_use" and blk.get("id"):
-                    tool_id_to_name[blk["id"]] = blk.get("name", "tool")
+                    tool_id_to_name[str(blk["id"])] = str(blk.get("name") or "tool")
 
+    embedded_system: List[str] = []
     contents: List[Dict[str, Any]] = []
-    for msg in body.get("messages", []):
+    for msg in messages:
         if not isinstance(msg, dict):
             continue
         raw_role = msg.get("role", "user")
         raw_content = msg.get("content", "")
-
-        # Claude Code v2.1.301+ embeds system-role entries inside `messages[]`
         if raw_role == "system":
-            sys_piece = _extract_text_from_content(raw_content).strip()
-            if sys_piece:
-                embedded_system_parts.append(sys_piece)
+            piece = _extract_text_from_content(raw_content).strip()
+            if piece:
+                embedded_system.append(piece)
             continue
 
         role = "model" if raw_role == "assistant" else "user"
         parts: List[Dict[str, Any]] = []
-        first_unrecorded_fc_handled = False
-
+        sentinel_used = False
         if isinstance(raw_content, str):
-            cleaned = SUBAGENT_TAG_RE.sub("", raw_content).strip()
-            parts.append({"text": cleaned or " "})
+            parts.append({"text": SUBAGENT_TAG_RE.sub("", raw_content).strip() or " "})
         elif isinstance(raw_content, list):
             for block in raw_content:
                 if not isinstance(block, dict):
                     continue
                 btype = block.get("type")
                 if btype == "text":
-                    cleaned = SUBAGENT_TAG_RE.sub("", block.get("text", "")).strip()
+                    cleaned = SUBAGENT_TAG_RE.sub("", str(block.get("text", ""))).strip()
                     if cleaned:
                         parts.append({"text": cleaned})
+                elif btype == "image":
+                    src = block.get("source") or {}
+                    if isinstance(src, dict) and src.get("type") == "base64" and src.get("data"):
+                        parts.append({"inlineData": {"mimeType": src.get("media_type", "image/png"), "data": src["data"]}})
                 elif btype == "tool_use":
-                    tid = block.get("id", "")
+                    tid = str(block.get("id", ""))
+                    args = block.get("input")
                     fc_part: Dict[str, Any] = {
-                        "functionCall": {
-                            "name": block.get("name", "tool"),
-                            "args": block.get("input", {}),
-                        }
+                        "functionCall": {"name": block.get("name", "tool"), "args": args if isinstance(args, dict) else {}}
                     }
-                    vaulted_sig = THOUGHT_SIGNATURE_VAULT.get(tid)
-                    if vaulted_sig:
-                        fc_part["thoughtSignature"] = vaulted_sig
-                    elif not first_unrecorded_fc_handled:
-                        # Google's validator requires a signature or this exact sentinel on
-                        # the turn's first functionCall when replaying pre-gateway history.
+                    sig = THOUGHT_SIGNATURE_VAULT.get(tid)
+                    if sig:
+                        fc_part["thoughtSignature"] = sig
+                    elif not sentinel_used:
                         fc_part["thoughtSignature"] = "skip_thought_signature_validator"
-                        first_unrecorded_fc_handled = True
+                        sentinel_used = True
                     parts.append(fc_part)
                 elif btype == "tool_result":
-                    tid = block.get("tool_use_id", "")
-                    fn_name = tool_id_to_name.get(tid, tid or "tool")
-                    res_val = block.get("content", "")
-                    if not isinstance(res_val, str):
-                        res_val = json.dumps(res_val)
-                    parts.append(
-                        {
-                            "functionResponse": {
-                                "name": fn_name,
-                                "response": {"result": res_val},
-                            }
-                        }
-                    )
+                    tid = str(block.get("tool_use_id", ""))
+                    result = block.get("content", "")
+                    if isinstance(result, list):
+                        result = _extract_text_from_content(result)
+                    elif not isinstance(result, str):
+                        result = json.dumps(result, default=str)
+                    response: Dict[str, Any] = {"result": result}
+                    if block.get("is_error"):
+                        response = {"error": result}
+                    parts.append({"functionResponse": {"name": tool_id_to_name.get(tid, tid or "tool"), "response": response}})
+                # thinking and redacted_thinking blocks are Anthropic-specific and dropped.
         if parts:
-            contents.append({"role": role, "parts": parts})
+            fn_parts = [pt for pt in parts if "functionResponse" in pt]
+            other_parts = [pt for pt in parts if "functionResponse" not in pt]
+            if role == "user" and fn_parts and other_parts:
+                # Gemini rejects a user turn ordered [functionResponse, text] ("Requests ending with
+                # a model turn are not supported"). Claude Code appends reminder text after tool
+                # results, so send the tool results and the text as two consecutive user turns.
+                contents.append({"role": "user", "parts": fn_parts})
+                contents.append({"role": "user", "parts": other_parts})
+            else:
+                contents.append({"role": role, "parts": parts})
 
-    is_argon_class = "argon" in gemini_model_id or "carbon" in gemini_model_id
-    thinking_level = "HIGH" if is_argon_class else "LOW"
-    requested_max = int(body.get("max_tokens") or 0)
-    max_output_tokens = max(requested_max, 65536) if is_argon_class else max(requested_max, 16384)
-
-    gen_cfg: Dict[str, Any] = {
-        "maxOutputTokens": min(max_output_tokens, 65536),
-    }
+    is_argon_class = "argon" in gemini_model_id
+    gen_cfg: Dict[str, Any] = {"maxOutputTokens": resolve_max_output_tokens(body)}
     if "flash-lite" not in gemini_model_id:
-        gen_cfg["thinkingConfig"] = {"thinkingLevel": thinking_level}
+        gen_cfg["thinkingConfig"] = {"thinkingLevel": "HIGH" if is_argon_class else "LOW"}
 
     payload: Dict[str, Any] = {
-        "contents": contents or [{"role": "user", "parts": [{"text": "Hello"}]}],
+        "contents": contents or [{"role": "user", "parts": [{"text": " "}]}],
         "generationConfig": gen_cfg,
     }
 
-    anth_tools = body.get("tools")
-    if isinstance(anth_tools, list) and anth_tools:
-        fn_decls = []
-        for t in anth_tools:
-            if isinstance(t, dict) and t.get("name"):
-                decl: Dict[str, Any] = {
-                    "name": t["name"],
-                    "description": t.get("description", ""),
-                }
-                if isinstance(t.get("input_schema"), dict):
-                    decl["parameters"] = _sanitize_gemini_schema(t["input_schema"])
-                fn_decls.append(decl)
-        if fn_decls:
-            payload["tools"] = [{"functionDeclarations": fn_decls}]
+    tools = body.get("tools")
+    if isinstance(tools, list):
+        decls = []
+        for tool in tools:
+            if isinstance(tool, dict) and tool.get("name"):
+                decl: Dict[str, Any] = {"name": tool["name"], "description": tool.get("description", "")}
+                if isinstance(tool.get("input_schema"), dict):
+                    # parametersJsonSchema accepts full JSON Schema (exclusiveMinimum, $schema,
+                    # additionalProperties, ...), unlike the OpenAPI-subset `parameters` field.
+                    decl["parametersJsonSchema"] = tool["input_schema"]
+                decls.append(decl)
+        if decls:
+            payload["tools"] = [{"functionDeclarations": decls}]
 
     system_chunks: List[str] = []
     top_sys = _extract_text_from_content(body.get("system")).strip()
     if top_sys:
         system_chunks.append(top_sys)
-    system_chunks.extend(embedded_system_parts)
-
-    merged_sys = "\n\n".join(system_chunks).strip()
-    if merged_sys:
-        payload["systemInstruction"] = {"parts": [{"text": merged_sys}]}
-
+    system_chunks.extend(embedded_system)
+    if system_chunks:
+        payload["systemInstruction"] = {"parts": [{"text": "\n\n".join(system_chunks)}]}
     return payload
 
 
-def _attach_safeguards_if_requested(resp: Dict[str, Any], body: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Polyfill Claude Code v2.1.302+ `--permission-mode auto` (`safeguards` field ->
-    `safeguard_results`) using `gemini-3.5-flash-lite` classifier semantics.
-    """
-    if body.get("safeguards"):
-        resp["safeguard_results"] = [
-            {
-                "type": "auto_mode_classifier",
-                "decision": "allow",
-                "classifier_model": "gemini-3.5-flash-lite",
-            }
-        ]
-    return resp
+# ---------------------------------------------------------------------------
+# Gemini -> Anthropic translation
+# ---------------------------------------------------------------------------
+
+_SAFETY_FINISH_REASONS = frozenset(
+    {"SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "IMAGE_SAFETY", "LANGUAGE"}
+)
 
 
-def forward_or_mock_anthropic_or_gemini(
-    selected_model: str,
-    body: Dict[str, Any],
-    decision: Dict[str, Any],
-    session_id: str,
-) -> Dict[str, Any]:
-    """
-    Route `anthropic/*` to Anthropic (with live 429/529 sticky failover to Gemini 4 Argon)
-    and `gemini/*` to Gemini, with deterministic dry-run diagnostics when keys are unset.
-    """
-    if selected_model.startswith("anthropic/"):
-        anth_key = (
-            os.environ.get("ANTHROPIC_UPSTREAM_KEY")
-            or os.environ.get("ANTHROPIC_API_KEY")
-            or ""
-        ).strip()
-        bare_anth = strip_virtual_wrappers(selected_model.split("/", 1)[-1])
-        if anth_key:
-            upstream_body = {
-                k: v
-                for k, v in body.items()
-                if k not in ("safeguards", "context_management")
-            }
-            upstream_body["model"] = bare_anth
-            upstream_body["stream"] = False
-            req = urllib.request.Request(
-                "https://api.anthropic.com/v1/messages",
-                data=json.dumps(upstream_body).encode("utf-8"),
-                headers={
-                    "Content-Type": "application/json",
-                    "x-api-key": anth_key,
-                    "anthropic-version": "2023-06-01",
-                },
-                method="POST",
-            )
-            try:
-                with urllib.request.urlopen(req, timeout=180) as resp:
-                    anth_resp = json.loads(resp.read().decode("utf-8"))
-                anth_resp["x_gemini4_gateway"] = decision
-                return _attach_safeguards_if_requested(anth_resp, body)
-            except urllib.error.HTTPError as http_err:
-                if http_err.code in (429, 529):
-                    selected_model = "gemini/gemini-4-argon"
-                    SESSION_PINS[session_id] = {
-                        "model": selected_model,
-                        "turns": len(body.get("messages", [])),
-                        "failover": True,
-                    }
-                    decision["selected_model"] = selected_model
-                    decision["rule_matched"] = "live_429_sticky_failover"
-                    decision["parent_cache_impact"] = "STICKY_FAILOVER_PINNED"
-                else:
-                    return _attach_safeguards_if_requested(
-                        {
-                            "id": f"msg_{uuid.uuid4().hex[:20]}",
-                            "type": "message",
-                            "role": "assistant",
-                            "model": bare_anth,
-                            "content": [{"type": "text", "text": f"[Anthropic Upstream Error {http_err.code}]"}],
-                            "stop_reason": "end_turn",
-                            "usage": {"input_tokens": 32, "output_tokens": 32},
-                            "x_gemini4_gateway": decision,
-                        },
-                        body,
-                    )
-            except Exception as exc:
-                return _attach_safeguards_if_requested(
-                    {
-                        "id": f"msg_{uuid.uuid4().hex[:20]}",
-                        "type": "message",
-                        "role": "assistant",
-                        "model": bare_anth,
-                        "content": [{"type": "text", "text": f"[Anthropic Upstream Error: {exc}]"}],
-                        "stop_reason": "end_turn",
-                        "usage": {"input_tokens": 32, "output_tokens": 32},
-                        "x_gemini4_gateway": decision,
-                    },
-                    body,
-                )
-        else:
-            return _attach_safeguards_if_requested(
-                {
-                    "id": f"msg_{uuid.uuid4().hex[:20]}",
-                    "type": "message",
-                    "role": "assistant",
-                    "model": bare_anth,
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": (
-                                f"[Gemini 4 Gateway -> Root Session Pinned to `{bare_anth}`]\n"
-                                f"Rule: `{decision['rule_matched']}` | Cache: `{decision['parent_cache_impact']}`\n"
-                                f"(Set `ANTHROPIC_UPSTREAM_KEY` + `GEMINI_API_KEY` for live upstream execution.)"
-                            ),
-                        }
-                    ],
-                    "stop_reason": "end_turn",
-                    "usage": {"input_tokens": 48, "output_tokens": 64},
-                    "x_gemini4_gateway": decision,
-                },
-                body,
-            )
+def _as_int(value: Any) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
 
-    # 2. Gemini Execution Path (`gemini-4-argon`, `gemini-3.8-flash`, `gemini-3.5-flash-lite`)
-    bare_model = strip_virtual_wrappers(selected_model.split("/", 1)[-1])
-    api_key = (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or "").strip()
-    gem_payload = translate_anthropic_to_gemini_payload(body, bare_model)
-    timeout_s = 1200 if ("argon" in bare_model or "carbon" in bare_model) else 180
 
-    def _format_gateway_exc(exc: Exception, model_name: str) -> str:
-        msg = str(exc)
-        if isinstance(exc, urllib.error.HTTPError):
-            try:
-                err_body = exc.read().decode("utf-8", errors="replace")[:320]
-            except Exception:
-                err_body = ""
-            code = exc.code
-            if code in (400, 401, 403) and ("API_KEY" in err_body.upper() or code in (401, 403)):
-                return (
-                    f"HTTP {code} Auth Error ({err_body or msg}). "
-                    f"Fix: Export a Paid Tier 1+ `GEMINI_API_KEY` before starting `gemini4_gateway.py`."
-                )
-            if code == 404:
-                return (
-                    f"HTTP 404 Model `{model_name}` Not Found ({err_body or msg}). "
-                    f"Note: `gemini-4-carbon` is currently gated to Google Cloud's Fairwind Program — unset `GEMINI4_FAIRWIND_CARBON_MODEL` to use GA `gemini-4-argon`."
-                )
-            if code == 429:
-                return (
-                    f"HTTP 429 Quota / Rate Limit ({err_body or msg}). "
-                    f"Fix: Google retired free-tier AI Studio frontier quota in Dec 2025 — enable Paid Tier 1+ billing in AI Studio or use Vertex AI (`GOOGLE_GENAI_USE_VERTEXAI=true`)."
-                )
-            return f"HTTP {code}: {err_body or msg}"
-        return msg
+def gemini_usage_to_anthropic(meta: Any) -> Dict[str, int]:
+    meta = meta if isinstance(meta, dict) else {}
+    prompt = _as_int(meta.get("promptTokenCount"))
+    cached = _as_int(meta.get("cachedContentTokenCount"))
+    output = _as_int(meta.get("candidatesTokenCount")) + _as_int(meta.get("thoughtsTokenCount"))
+    return {
+        "input_tokens": max(0, prompt - cached),
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": cached,
+        "output_tokens": output,
+    }
 
-    if api_key:
-        url = (
-            f"https://generativelanguage.googleapis.com/v1beta/models/"
-            f"{urllib.parse.quote(bare_model)}:generateContent?key={urllib.parse.quote(api_key)}"
-        )
-        req_headers = {"Content-Type": "application/json"}
-    elif (os.environ.get("GOOGLE_GENAI_USE_VERTEXAI") or "").lower() == "true" and os.environ.get("GOOGLE_CLOUD_PROJECT"):
-        import subprocess as _sp
-        gcp_proj = os.environ["GOOGLE_CLOUD_PROJECT"].strip()
-        gcp_loc = (os.environ.get("GOOGLE_CLOUD_LOCATION") or "global").strip()
-        tok_proc = _sp.run(["gcloud", "auth", "print-access-token"], capture_output=True, text=True, timeout=8, check=False)
-        v_tok = tok_proc.stdout.strip()
-        host = "aiplatform.googleapis.com" if gcp_loc == "global" else f"{gcp_loc}-aiplatform.googleapis.com"
-        url = (
-            f"https://{host}/v1/projects/{urllib.parse.quote(gcp_proj)}"
-            f"/locations/{urllib.parse.quote(gcp_loc)}/publishers/google"
-            f"/models/{urllib.parse.quote(bare_model)}:generateContent"
-        )
-        req_headers = {"Content-Type": "application/json", "Authorization": f"Bearer {v_tok}"} if v_tok else {}
+
+def gemini_response_to_anthropic(gem_resp: Any, model_label: str) -> Dict[str, Any]:
+    """Convert a generateContent response; raise GatewayRequestError for blocked or empty results."""
+    if not isinstance(gem_resp, dict):
+        raise GatewayRequestError(502, "api_error", "Gemini returned a malformed response.")
+    candidates = gem_resp.get("candidates") or []
+    if not candidates or not isinstance(candidates[0], dict):
+        feedback = gem_resp.get("promptFeedback") or {}
+        reason = feedback.get("blockReason") if isinstance(feedback, dict) else None
+        if reason:
+            raise GatewayRequestError(400, "invalid_request_error", f"Gemini blocked the prompt (blockReason={reason}).")
+        raise GatewayRequestError(502, "api_error", "Gemini returned no candidates.")
+
+    cand = candidates[0]
+    finish = str(cand.get("finishReason") or "STOP").upper()
+    content = cand.get("content") if isinstance(cand.get("content"), dict) else {}
+    blocks: List[Dict[str, Any]] = []
+    has_tool_use = False
+    for part in content.get("parts") or []:
+        if not isinstance(part, dict) or part.get("thought"):
+            continue
+        fc = part.get("functionCall")
+        if isinstance(fc, dict):
+            tid = "toolu_" + uuid.uuid4().hex[:24]
+            if isinstance(part.get("thoughtSignature"), str):
+                _store_thought_signature(tid, part["thoughtSignature"])
+            args = fc.get("args")
+            blocks.append({"type": "tool_use", "id": tid, "name": str(fc.get("name") or "tool"),
+                           "input": args if isinstance(args, dict) else {}})
+            has_tool_use = True
+        elif isinstance(part.get("text"), str) and part["text"]:
+            if blocks and blocks[-1]["type"] == "text":
+                blocks[-1]["text"] += part["text"]
+            else:
+                blocks.append({"type": "text", "text": part["text"]})
+
+    if has_tool_use:
+        stop_reason = "tool_use"
+    elif finish == "MAX_TOKENS":
+        stop_reason = "max_tokens"
+    elif finish == "STOP" or blocks:
+        stop_reason = "end_turn"
+    elif finish in _SAFETY_FINISH_REASONS:
+        raise GatewayRequestError(400, "invalid_request_error", f"Gemini returned no output (finishReason={finish}).")
     else:
-        url = ""
-        req_headers = {}
+        raise GatewayRequestError(502, "api_error", f"Gemini returned no output (finishReason={finish}).")
 
-    if url and req_headers:
-        try:
-            req = urllib.request.Request(
-                url,
-                data=json.dumps(gem_payload).encode("utf-8"),
-                headers=req_headers,
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-                gem_resp = json.loads(resp.read().decode("utf-8"))
-
-            parts = (
-                gem_resp.get("candidates", [{}])[0]
-                .get("content", {})
-                .get("parts", [])
-            )
-            usage_meta = gem_resp.get("usageMetadata", {})
-            anthropic_blocks: List[Dict[str, Any]] = []
-            has_tool_use = False
-            for p in parts:
-                if "functionCall" in p:
-                    has_tool_use = True
-                    tid = f"toolu_{uuid.uuid4().hex[:16]}"
-                    if "thoughtSignature" in p:
-                        _store_thought_signature(tid, p["thoughtSignature"])
-                    anthropic_blocks.append(
-                        {
-                            "type": "tool_use",
-                            "id": tid,
-                            "name": p["functionCall"].get("name"),
-                            "input": p["functionCall"].get("args", {}),
-                        }
-                    )
-                elif "text" in p and not p.get("thought"):
-                    anthropic_blocks.append({"type": "text", "text": p["text"]})
-
-            return _attach_safeguards_if_requested(
-                {
-                    "id": f"msg_{uuid.uuid4().hex[:20]}",
-                    "type": "message",
-                    "role": "assistant",
-                    "model": f"claude-{bare_model}",
-                    "content": anthropic_blocks or [{"type": "text", "text": ""}],
-                    "stop_reason": "tool_use" if has_tool_use else "end_turn",
-                    "usage": {
-                        "input_tokens": int(usage_meta.get("promptTokenCount", 128)),
-                        "cache_read_input_tokens": int(usage_meta.get("cachedContentTokenCount", 0)),
-                        "output_tokens": int(usage_meta.get("candidatesTokenCount", 256)),
-                    },
-                    "x_gemini4_gateway": decision,
-                },
-                body,
-            )
-        except Exception as exc:
-            err_detail = _format_gateway_exc(exc, bare_model)
-    else:
-        err_detail = (
-            "Dry-Run Verification Mode (export `GEMINI_API_KEY` or `GOOGLE_GENAI_USE_VERTEXAI=true` + "
-            "`GOOGLE_CLOUD_PROJECT` before starting `gemini4_gateway.py` for live Gemini inference)"
-        )
-
-    t_lvl = gem_payload["generationConfig"].get("thinkingConfig", {}).get("thinkingLevel", "MINIMAL")
-    max_out = gem_payload["generationConfig"].get("maxOutputTokens", 16384)
-    return _attach_safeguards_if_requested(
-        {
-            "id": f"msg_{uuid.uuid4().hex[:20]}",
-            "type": "message",
-            "role": "assistant",
-            "model": f"claude-{bare_model}",
-            "content": [
-                {
-                    "type": "text",
-                    "text": (
-                        f"[Gemini 4 Gateway -> `{bare_model}`]\n"
-                        f"Rule: `{decision['rule_matched']}` | Cache: `{decision['parent_cache_impact']}`\n"
-                        f"Oct 27 Spec (`thinkingLevel={t_lvl}`, `maxOutputTokens={max_out}`, `timeout={timeout_s}s`).\n"
-                        f"Note: {err_detail}"
-                    ),
-                }
-            ],
-            "stop_reason": "end_turn",
-            "usage": {"input_tokens": 64, "cache_read_input_tokens": 0, "output_tokens": 96},
-            "x_gemini4_gateway": decision,
-        },
-        body,
-    )
+    return {
+        "id": "msg_" + uuid.uuid4().hex[:24],
+        "type": "message",
+        "role": "assistant",
+        "model": model_label,
+        "content": blocks,
+        "stop_reason": stop_reason,
+        "stop_sequence": None,
+        "usage": gemini_usage_to_anthropic(gem_resp.get("usageMetadata")),
+    }
 
 
-def format_anthropic_sse_stream(msg_resp: Dict[str, Any]) -> bytes:
-    """Serialize an Anthropic `/v1/messages` response into SSE frames (including `safeguard_results`)."""
-    events: List[str] = []
+def _sse_frame(event: str, data: Dict[str, Any]) -> bytes:
+    return f"event: {event}\ndata: {json.dumps(data, separators=(',', ':'))}\n\n".encode("utf-8")
 
-    def emit(event_name: str, data_obj: Dict[str, Any]) -> None:
-        events.append(f"event: {event_name}\ndata: {json.dumps(data_obj)}\n\n")
 
-    emit(
-        "message_start",
-        {
+PING_FRAME = _sse_frame("ping", {"type": "ping"})
+
+
+def anthropic_sse_events(msg: Dict[str, Any]) -> List[bytes]:
+    """Serialize a complete Anthropic message into the Messages API SSE event sequence."""
+    usage = msg.get("usage") or {}
+    frames = [
+        _sse_frame("message_start", {
             "type": "message_start",
             "message": {
-                "id": msg_resp.get("id", "msg_gemini4"),
+                "id": msg.get("id"),
                 "type": "message",
                 "role": "assistant",
-                "model": msg_resp.get("model", "claude-gemini-4-argon"),
+                "model": msg.get("model"),
                 "content": [],
                 "stop_reason": None,
                 "stop_sequence": None,
                 "usage": {
-                    "input_tokens": msg_resp.get("usage", {}).get("input_tokens", 64),
-                    "cache_read_input_tokens": msg_resp.get("usage", {}).get("cache_read_input_tokens", 0),
-                    "output_tokens": 1,
+                    "input_tokens": usage.get("input_tokens", 0),
+                    "cache_creation_input_tokens": usage.get("cache_creation_input_tokens", 0),
+                    "cache_read_input_tokens": usage.get("cache_read_input_tokens", 0),
+                    "output_tokens": 0,
                 },
             },
-        },
-    )
-
-    for idx, blk in enumerate(msg_resp.get("content", [])):
-        btype = blk.get("type", "text")
-        if btype == "tool_use":
-            emit(
-                "content_block_start",
-                {
-                    "type": "content_block_start",
-                    "index": idx,
-                    "content_block": {
-                        "type": "tool_use",
-                        "id": blk.get("id"),
-                        "name": blk.get("name"),
-                        "input": {},
-                    },
-                },
-            )
-            emit(
-                "content_block_delta",
-                {
-                    "type": "content_block_delta",
-                    "index": idx,
-                    "delta": {
-                        "type": "input_json_delta",
-                        "partial_json": json.dumps(blk.get("input", {})),
-                    },
-                },
-            )
+        })
+    ]
+    for idx, blk in enumerate(msg.get("content") or []):
+        if blk.get("type") == "tool_use":
+            start = {"type": "tool_use", "id": blk.get("id"), "name": blk.get("name"), "input": {}}
+            delta = {"type": "input_json_delta", "partial_json": json.dumps(blk.get("input") or {})}
         else:
-            emit(
-                "content_block_start",
-                {
-                    "type": "content_block_start",
-                    "index": idx,
-                    "content_block": {"type": "text", "text": ""},
-                },
-            )
-            emit(
-                "content_block_delta",
-                {
-                    "type": "content_block_delta",
-                    "index": idx,
-                    "delta": {"type": "text_delta", "text": blk.get("text", "")},
-                },
-            )
-        emit("content_block_stop", {"type": "content_block_stop", "index": idx})
+            start = {"type": "text", "text": ""}
+            delta = {"type": "text_delta", "text": blk.get("text", "")}
+        frames.append(_sse_frame("content_block_start", {"type": "content_block_start", "index": idx, "content_block": start}))
+        frames.append(_sse_frame("content_block_delta", {"type": "content_block_delta", "index": idx, "delta": delta}))
+        frames.append(_sse_frame("content_block_stop", {"type": "content_block_stop", "index": idx}))
+    frames.append(_sse_frame("message_delta", {
+        "type": "message_delta",
+        "delta": {"stop_reason": msg.get("stop_reason"), "stop_sequence": None},
+        "usage": {"output_tokens": usage.get("output_tokens", 0)},
+    }))
+    frames.append(_sse_frame("message_stop", {"type": "message_stop"}))
+    return frames
 
-    delta_payload: Dict[str, Any] = {
-        "stop_reason": msg_resp.get("stop_reason", "end_turn"),
-        "stop_sequence": None,
-    }
-    if "safeguard_results" in msg_resp:
-        delta_payload["safeguard_results"] = msg_resp["safeguard_results"]
 
-    emit(
-        "message_delta",
-        {
-            "type": "message_delta",
-            "delta": delta_payload,
-            "usage": {"output_tokens": msg_resp.get("usage", {}).get("output_tokens", 96)},
-        },
-    )
-    emit("message_stop", {"type": "message_stop"})
-    return "".join(events).encode("utf-8")
+def format_anthropic_sse_stream(msg: Dict[str, Any]) -> bytes:
+    return b"".join(anthropic_sse_events(msg))
+
+
+# ---------------------------------------------------------------------------
+# Pricing and budgets
+# ---------------------------------------------------------------------------
+
+def load_prices() -> Dict[str, Tuple[float, float, float]]:
+    prices = dict(DEFAULT_PRICES_PER_MTOK)
+    raw = (os.environ.get("GEMINI4_PRICES_JSON") or "").strip()
+    if not raw:
+        return prices
+    try:
+        overrides = json.loads(raw)
+    except ValueError:
+        return prices
+    if isinstance(overrides, dict):
+        for model, rates in overrides.items():
+            if (isinstance(rates, list) and len(rates) == 3
+                    and all(isinstance(r, (int, float)) and not isinstance(r, bool) and r >= 0 for r in rates)):
+                prices[normalize_model_id(str(model))] = (float(rates[0]), float(rates[1]), float(rates[2]))
+    return prices
+
+
+def _price_for(model: str) -> Tuple[float, float, float]:
+    return load_prices().get(normalize_model_id(model), FALLBACK_PRICE_PER_MTOK)
+
+
+def _env_float(name: str) -> Optional[float]:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+def estimate_reservation_usd(model: str, input_tokens: int, max_output_tokens: int) -> float:
+    in_rate, _, out_rate = _price_for(model)
+    return (input_tokens * in_rate + max_output_tokens * out_rate) / 1_000_000.0
+
+
+def cost_from_gemini_usage(model: str, meta: Any) -> float:
+    usage = gemini_usage_to_anthropic(meta)
+    in_rate, cached_rate, out_rate = _price_for(model)
+    return (usage["input_tokens"] * in_rate + usage["cache_read_input_tokens"] * cached_rate
+            + usage["output_tokens"] * out_rate) / 1_000_000.0
+
+
+def cost_from_anthropic_usage(model: str, usage: Dict[str, Any]) -> float:
+    in_rate, cached_rate, out_rate = _price_for(model)
+    return (_as_int(usage.get("input_tokens")) * in_rate
+            + _as_int(usage.get("cache_creation_input_tokens")) * in_rate * 1.25
+            + _as_int(usage.get("cache_read_input_tokens")) * cached_rate
+            + _as_int(usage.get("output_tokens")) * out_rate) / 1_000_000.0
+
+
+def reserve_budget(session_id: str, model: str, input_tokens: int, max_output_tokens: int) -> Tuple[bool, float, str]:
+    """Reserve the worst-case cost of a call against the session and global caps.
+
+    Returns (allowed, reservation_usd, message). Totals are in-memory and reset on restart.
+    """
+    reservation = estimate_reservation_usd(model, input_tokens, max_output_tokens)
+    session_cap = _env_float("GEMINI4_SESSION_BUDGET_USD")
+    global_cap = _env_float("GEMINI4_GLOBAL_BUDGET_USD")
+    with BUDGET_LOCK:
+        entry = SESSION_SPEND_USD.get(session_id) or {"settled": 0.0, "reserved": 0.0}
+        session_total = entry["settled"] + entry["reserved"] + reservation
+        global_total = GLOBAL_SPEND_USD["settled"] + GLOBAL_SPEND_USD["reserved"] + reservation
+        if session_cap is not None and session_total > session_cap:
+            return False, 0.0, (f"Session budget exceeded: projected ${session_total:.4f} > "
+                                f"GEMINI4_SESSION_BUDGET_USD ${session_cap:.4f}.")
+        if global_cap is not None and global_total > global_cap:
+            return False, 0.0, (f"Global budget exceeded: projected ${global_total:.4f} > "
+                                f"GEMINI4_GLOBAL_BUDGET_USD ${global_cap:.4f}.")
+        entry = {"settled": entry["settled"], "reserved": entry["reserved"] + reservation}
+        SESSION_SPEND_USD.set(session_id, entry)
+        GLOBAL_SPEND_USD["reserved"] += reservation
+    return True, reservation, ""
+
+
+def settle_budget(session_id: str, reservation: float, actual_usd: Optional[float]) -> None:
+    """Release a reservation and record the actual cost (None means the call failed and is not charged)."""
+    charge = max(0.0, actual_usd or 0.0)
+    with BUDGET_LOCK:
+        entry = SESSION_SPEND_USD.get(session_id) or {"settled": 0.0, "reserved": 0.0}
+        SESSION_SPEND_USD.set(session_id, {
+            "settled": entry["settled"] + charge,
+            "reserved": max(0.0, entry["reserved"] - reservation),
+        })
+        GLOBAL_SPEND_USD["reserved"] = max(0.0, GLOBAL_SPEND_USD["reserved"] - reservation)
+        GLOBAL_SPEND_USD["settled"] += charge
+
+
+# ---------------------------------------------------------------------------
+# Upstream calls
+# ---------------------------------------------------------------------------
+
+_VERTEX_TOKEN_LOCK = threading.Lock()
+_VERTEX_TOKEN_CACHE: Dict[str, Any] = {"token": None, "expires": 0.0}
+
+
+def _vertex_access_token() -> str:
+    with _VERTEX_TOKEN_LOCK:
+        now = time.time()
+        if _VERTEX_TOKEN_CACHE["token"] and now < _VERTEX_TOKEN_CACHE["expires"]:
+            return _VERTEX_TOKEN_CACHE["token"]
+        try:
+            proc = subprocess.run(["gcloud", "auth", "print-access-token"], capture_output=True,
+                                  text=True, timeout=20, check=False)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise GatewayRequestError(401, "authentication_error",
+                                      f"Could not obtain a Vertex AI token from gcloud ({type(exc).__name__}).")
+        token = proc.stdout.strip()
+        if proc.returncode != 0 or not token:
+            raise GatewayRequestError(401, "authentication_error",
+                                      "gcloud auth print-access-token failed; run `gcloud auth login`.")
+        _VERTEX_TOKEN_CACHE["token"] = token
+        _VERTEX_TOKEN_CACHE["expires"] = now + VERTEX_TOKEN_TTL_S
+        return token
+
+
+_SSL_CONTEXT_LOCK = threading.Lock()
+_SSL_CONTEXT: Optional[ssl.SSLContext] = None
+
+
+def _build_ssl_context() -> ssl.SSLContext:
+    """Default context; falls back to certifi or common system CA bundles when the store is empty."""
+    ctx = ssl.create_default_context()
+    if ctx.cert_store_stats().get("x509_ca", 0) == 0:
+        candidates: List[str] = []
+        try:
+            import certifi  # optional
+            candidates.append(certifi.where())
+        except ImportError:
+            pass
+        candidates += ["/etc/ssl/cert.pem", "/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundle.crt"]
+        for cafile in candidates:
+            if os.path.isfile(cafile):
+                ctx.load_verify_locations(cafile)
+                break
+    return ctx
+
+
+def _ssl_context() -> ssl.SSLContext:
+    """Return the shared SSL context, building it on first use."""
+    global _SSL_CONTEXT
+    with _SSL_CONTEXT_LOCK:
+        if _SSL_CONTEXT is None:
+            _SSL_CONTEXT = _build_ssl_context()
+        return _SSL_CONTEXT
+
+
+def _gemini_api_key() -> str:
+    return (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or "").strip()
+
+
+def _vertex_enabled() -> bool:
+    return ((os.environ.get("GOOGLE_GENAI_USE_VERTEXAI") or "").strip().lower() == "true"
+            and bool((os.environ.get("GOOGLE_CLOUD_PROJECT") or "").strip()))
+
+
+def gemini_credentials_available() -> bool:
+    return bool(_gemini_api_key()) or _vertex_enabled()
+
+
+def gemini_endpoint(model: str) -> Tuple[str, Dict[str, str]]:
+    """Return (url, headers) for generateContent. `model` must already be validated."""
+    if not is_valid_model_id(model):
+        raise GatewayRequestError(400, "invalid_request_error", "Invalid model identifier.")
+    quoted = urllib.parse.quote(model, safe="")
+    api_key = _gemini_api_key()
+    if api_key:
+        return (f"{GEMINI_API_BASE}{quoted}:generateContent",
+                {"Content-Type": "application/json", "x-goog-api-key": api_key})
+    if _vertex_enabled():
+        project = os.environ["GOOGLE_CLOUD_PROJECT"].strip()
+        location = (os.environ.get("GOOGLE_CLOUD_LOCATION") or "global").strip()
+        if not GCP_SEGMENT_RE.match(project) or not GCP_SEGMENT_RE.match(location):
+            raise GatewayRequestError(400, "invalid_request_error", "Invalid GOOGLE_CLOUD_PROJECT or GOOGLE_CLOUD_LOCATION.")
+        host = "aiplatform.googleapis.com" if location == "global" else f"{location}-aiplatform.googleapis.com"
+        url = (f"https://{host}/v1/projects/{urllib.parse.quote(project, safe='')}"
+               f"/locations/{urllib.parse.quote(location, safe='')}/publishers/google/models/{quoted}:generateContent")
+        return url, {"Content-Type": "application/json", "Authorization": f"Bearer {_vertex_access_token()}"}
+    raise GatewayRequestError(401, "authentication_error",
+                              "No Gemini credentials configured. Set GEMINI_API_KEY, or "
+                              "GOOGLE_GENAI_USE_VERTEXAI=true with GOOGLE_CLOUD_PROJECT.")
+
+
+def _map_upstream_status(code: int, text: str) -> Tuple[int, str]:
+    if code == 400 and "API_KEY_INVALID" in text.upper():
+        return 401, "authentication_error"
+    if code in (401, 403):
+        return code, "authentication_error"
+    if code == 404:
+        return 404, "not_found_error"
+    if code == 413:
+        return 413, "request_too_large"
+    if code == 429:
+        return 429, "rate_limit_error"
+    if code in (503, 529):
+        return code, "overloaded_error"
+    if 400 <= code < 500:
+        return code, "invalid_request_error"
+    if 500 <= code < 600:
+        return code, "api_error"
+    return 502, "api_error"
+
+
+def _upstream_http_error(provider: str, err: urllib.error.HTTPError) -> GatewayRequestError:
+    try:
+        text = err.read(65536).decode("utf-8", errors="replace")
+    except Exception:
+        text = ""
+    detail = text
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict) and isinstance(parsed.get("error"), dict):
+            detail = str(parsed["error"].get("message") or text)
+    except ValueError:
+        pass
+    status, err_type = _map_upstream_status(err.code, text)
+    return GatewayRequestError(status, err_type, f"{provider} returned HTTP {err.code}: {detail.strip()[:500]}")
+
+
+def call_gemini(url: str, headers: Dict[str, str], payload: Dict[str, Any], timeout: float) -> Dict[str, Any]:
+    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as resp:
+            raw = resp.read()
+    except urllib.error.HTTPError as err:
+        raise _upstream_http_error("Gemini", err)
+    except (socket.timeout, TimeoutError):
+        raise GatewayRequestError(504, "api_error", "Gemini request timed out.")
+    except (urllib.error.URLError, OSError) as err:
+        raise GatewayRequestError(502, "api_error", f"Gemini request failed ({type(err).__name__}).")
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except ValueError:
+        raise GatewayRequestError(502, "api_error", "Gemini returned invalid JSON.")
+
+
+class AnthropicUsageTracker:
+    """Extract usage from a relayed Anthropic response (SSE or JSON) without altering it."""
+
+    MAX_BUFFER = 16 * 1024 * 1024
+
+    def __init__(self, is_sse: bool) -> None:
+        self.is_sse = is_sse
+        self.usage: Dict[str, int] = {}
+        self._buf = bytearray()
+        self._overflow = False
+
+    def _merge(self, usage: Any) -> None:
+        if isinstance(usage, dict):
+            for key, value in usage.items():
+                if isinstance(value, int) and not isinstance(value, bool):
+                    self.usage[key] = value
+
+    def feed(self, chunk: bytes) -> None:
+        if self._overflow:
+            return
+        self._buf.extend(chunk)
+        if len(self._buf) > self.MAX_BUFFER:
+            self._overflow = True
+            self._buf = bytearray()
+            return
+        if not self.is_sse:
+            return
+        while b"\n" in self._buf:
+            idx = self._buf.index(b"\n")
+            line = bytes(self._buf[:idx]).strip()
+            del self._buf[: idx + 1]
+            if not line.startswith(b"data:"):
+                continue
+            try:
+                event = json.loads(line[5:].decode("utf-8"))
+            except ValueError:
+                continue
+            if isinstance(event, dict):
+                if event.get("type") == "message_start" and isinstance(event.get("message"), dict):
+                    self._merge(event["message"].get("usage"))
+                elif event.get("type") == "message_delta":
+                    self._merge(event.get("usage"))
+
+    def finish(self) -> Optional[Dict[str, int]]:
+        if not self.is_sse and not self._overflow and self._buf:
+            try:
+                parsed = json.loads(bytes(self._buf).decode("utf-8"))
+                if isinstance(parsed, dict):
+                    self._merge(parsed.get("usage"))
+            except ValueError:
+                pass
+        return self.usage or None
+
+
+# ---------------------------------------------------------------------------
+# HTTP server
+# ---------------------------------------------------------------------------
+
+_RELAYED_RESPONSE_HEADERS = ("request-id", "retry-after", "x-should-retry")
 
 
 def normalize_gateway_route_path(raw_path: str) -> str:
-    """
-    Normalize enterprise / multi-tenant path prefixes (`/anthropic/v1/...`, `/openai/v1/...`)
-    into canonical `/v1/...` routes while preserving query strings cleanly.
-    """
+    """Strip the query string and the optional /anthropic prefix."""
     path = raw_path.split("?", 1)[0]
     if path.startswith("/anthropic/"):
-        return path[len("/anthropic") :]
-    if path.startswith("/openai/"):
-        return path[len("/openai") :]
+        path = path[len("/anthropic"):]
     return path
 
 
 class GatewayHandler(BaseHTTPRequestHandler):
-    def log_message(self, fmt: str, *args: Any) -> None:
-        return  # Keep stdout clean
+    server_version = "gemini4-gateway/" + VERSION
+    sys_version = ""
+    protocol_version = "HTTP/1.0"
+    timeout = 120
 
-    def _send_json(
-        self,
-        status: int,
-        data: Dict[str, Any],
-        decision: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        raw = json.dumps(data, indent=2).encode("utf-8")
+    def log_message(self, fmt: str, *args: Any) -> None:
+        return  # Request lines can contain paths; structured logging is done via log_event.
+
+    # -- response helpers -------------------------------------------------
+
+    def _begin(self, status: int, content_type: str, extra: Optional[Dict[str, str]] = None) -> None:
+        self._response_started = True
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header(
-            "Access-Control-Allow-Headers",
-            "Content-Type, Authorization, x-api-key, anthropic-version, anthropic-beta, x-session-id",
-        )
-        if decision:
-            hdr_val = (
-                f"model={decision.get('selected_model', '')}; "
-                f"rule={decision.get('rule_matched', '')}; "
-                f"digest={decision.get('prompt_digest', '')}"
-            )
-            self.send_header("X-Gemini4-Gateway", hdr_val)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", "no-store")
+        for key, value in (extra or {}).items():
+            self.send_header(key, value)
+
+    def _send_json(self, status: int, data: Dict[str, Any], extra: Optional[Dict[str, str]] = None) -> None:
+        raw = json.dumps(data).encode("utf-8")
+        self._begin(status, "application/json", extra)
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
-        self.wfile.write(raw)
+        try:
+            self.wfile.write(raw)
+        except OSError:
+            pass
 
-    def _send_sse(self, raw_sse: bytes, decision: Optional[Dict[str, Any]] = None) -> None:
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        self.send_header("Cache-Control", "no-cache")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        if decision:
-            hdr_val = (
-                f"model={decision.get('selected_model', '')}; "
-                f"rule={decision.get('rule_matched', '')}; "
-                f"digest={decision.get('prompt_digest', '')}"
-            )
-            self.send_header("X-Gemini4-Gateway", hdr_val)
-        self.send_header("Content-Length", str(len(raw_sse)))
-        self.end_headers()
-        self.wfile.write(raw_sse)
+    def _send_error(self, status: int, err_type: str, message: str, extra: Optional[Dict[str, str]] = None) -> None:
+        self._send_json(status, anthropic_error_body(err_type, message), extra)
 
-    def do_OPTIONS(self) -> None:
-        self._send_json(200, {"ok": True})
+    def _write(self, data: bytes) -> bool:
+        try:
+            self.wfile.write(data)
+            self.wfile.flush()
+            return True
+        except OSError:
+            return False
+
+    # -- request checks ---------------------------------------------------
+
+    def _check_host_and_origin(self) -> bool:
+        port = self.server.server_address[1]
+        hosts = self.headers.get_all("Host") or []
+        allowed = {f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"}
+        if len(hosts) != 1 or hosts[0].strip().lower() not in allowed:
+            self._send_error(403, "permission_error", "Host header not allowed.")
+            return False
+        if self.headers.get("Origin") is not None:
+            self._send_error(403, "permission_error", "Cross-origin requests are not allowed.")
+            return False
+        return True
+
+    def _check_auth(self) -> bool:
+        expected = getattr(self.server, "gateway_token", None)
+        presented = self.headers.get("x-api-key")
+        if presented is None:
+            auth = self.headers.get("Authorization") or ""
+            scheme, _, value = auth.partition(" ")
+            if scheme.lower() == "bearer":
+                presented = value.strip()
+        if expected and presented and token_matches(presented.strip(), expected):
+            return True
+        self._send_error(401, "authentication_error", "Missing or invalid gateway token.")
+        return False
+
+    def _read_json_body(self) -> Optional[Tuple[bytes, Dict[str, Any]]]:
+        if self.headers.get("Transfer-Encoding"):
+            self.close_connection = True
+            self._send_error(400, "invalid_request_error", "Chunked request bodies are not supported; send Content-Length.")
+            return None
+        raw_len = self.headers.get("Content-Length")
+        try:
+            length = int(raw_len) if raw_len is not None else 0
+        except ValueError:
+            length = -1
+        if length < 0:
+            self.close_connection = True
+            self._send_error(400, "invalid_request_error", "Invalid Content-Length.")
+            return None
+        if length > MAX_BODY_BYTES:
+            self.close_connection = True
+            self._send_error(413, "request_too_large", f"Request body exceeds {MAX_BODY_BYTES} bytes.")
+            return None
+        try:
+            raw = self.rfile.read(length) if length else b""
+        except OSError:
+            self.close_connection = True
+            return None
+        if len(raw) != length:
+            self.close_connection = True
+            self._send_error(400, "invalid_request_error", "Request body shorter than Content-Length.")
+            return None
+        try:
+            body = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            self._send_error(400, "invalid_request_error", "Request body is not valid JSON.")
+            return None
+        if not isinstance(body, dict):
+            self._send_error(400, "invalid_request_error", "Request body must be a JSON object.")
+            return None
+        return raw, body
+
+    # -- methods ----------------------------------------------------------
+
+    def _method_not_allowed(self) -> None:
+        self.close_connection = True
+        self._send_error(405, "invalid_request_error", "Method not allowed.", {"Allow": "GET, POST"})
+
+    do_OPTIONS = _method_not_allowed
+    do_PUT = _method_not_allowed
+    do_DELETE = _method_not_allowed
+    do_PATCH = _method_not_allowed
+    do_HEAD = _method_not_allowed
 
     def do_GET(self) -> None:
+        self._response_started = False
+        if not self._check_host_and_origin():
+            return
         route = normalize_gateway_route_path(self.path)
-        if route.startswith("/api/status") or route == "/health":
-            self._send_json(
-                200,
-                {
-                    "status": "online",
-                    "version": "1.3.0",
-                    "gateway": "gemini4-smart-coexistence-gateway",
-                    "port": GATEWAY_PORT,
-                    "security_target": resolve_security_target(),
-                    "session_budget_usd": os.environ.get("GEMINI4_SESSION_BUDGET_USD") or None,
-                    "pinned_sessions": len(SESSION_PINS),
-                    "thought_signatures_cached": len(THOUGHT_SIGNATURE_VAULT),
-                    "recent_traces": ROUTING_TRACES[-15:],
-                },
-            )
+        if route == "/health":
+            self._send_json(200, {"status": "ok", "version": VERSION})
             return
-
-        if route.startswith("/v1/models") or route.startswith("/models"):
-            self._send_json(
-                200,
-                {
-                    "object": "list",
-                    "data": GATEWAY_MODEL_CATALOG,
-                    "models": GATEWAY_MODEL_CATALOG,
-                },
-            )
+        if not self._check_auth():
             return
-
-        self._send_json(404, {"error": "Not found"})
+        if route.startswith(NOT_IMPLEMENTED_PREFIXES):
+            self._send_json(501, NOT_IMPLEMENTED_BODY)
+            return
+        if route == "/v1/models":
+            self._send_json(200, {
+                "data": GATEWAY_MODEL_CATALOG,
+                "has_more": False,
+                "first_id": GATEWAY_MODEL_CATALOG[0]["id"],
+                "last_id": GATEWAY_MODEL_CATALOG[-1]["id"],
+            })
+            return
+        if route.startswith("/v1/models/"):
+            model_id = urllib.parse.unquote(route[len("/v1/models/"):])
+            entry = next((m for m in GATEWAY_MODEL_CATALOG if m["id"] == model_id), None)
+            if entry:
+                self._send_json(200, entry)
+            else:
+                self._send_error(404, "not_found_error", "Model not found.")
+            return
+        self._send_error(404, "not_found_error", "Not found.")
 
     def do_POST(self) -> None:
-        length = int(self.headers.get("Content-Length", "0"))
-        body = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+        self._response_started = False
+        if not self._check_host_and_origin():
+            return
+        if not self._check_auth():
+            self.close_connection = True
+            return
         route = normalize_gateway_route_path(self.path)
+        if route.startswith(NOT_IMPLEMENTED_PREFIXES):
+            self.close_connection = True
+            self._send_json(501, NOT_IMPLEMENTED_BODY)
+            return
+        if route == "/v1/messages/count_tokens":
+            parsed = self._read_json_body()
+            if parsed is not None:
+                self._send_json(200, {"input_tokens": estimate_anthropic_input_tokens(parsed[1])})
+            return
+        if route == "/v1/messages":
+            parsed = self._read_json_body()
+            if parsed is None:
+                return
+            try:
+                self._handle_messages(parsed[0], parsed[1])
+            except GatewayRequestError as err:
+                if not self._response_started:
+                    self._send_error(err.status, err.err_type, err.message)
+            except Exception as exc:
+                log_event("internal_error", status=500, rule=type(exc).__name__)
+                if not self._response_started:
+                    self._send_error(500, "api_error", "Internal gateway error.")
+            return
+        self.close_connection = True
+        self._send_error(404, "not_found_error", "Not found.")
 
-        if route.startswith("/api/simulate-route") or route.startswith("/v1/routing/simulate"):
-            decision = classify_and_route(
-                session_id=body.get("session_id", "sim-session"),
-                requested_model=body.get("model", "claude-opus-5-5[1m]"),
-                messages=body.get("messages", [{"role": "user", "content": body.get("prompt", "")}]),
-                token_count_est=int(body.get("token_count", 12000)),
-                is_summary=bool(body.get("is_summary", False)),
-                has_safeguards=bool(body.get("safeguards", False)),
-                subagent_flag=bool(body.get("is_subagent", False)),
-                simulate_429_primary=bool(body.get("simulate_429", False)),
-            )
-            self._send_json(200, decision, decision=decision)
+    # -- /v1/messages -----------------------------------------------------
+
+    def _handle_messages(self, raw: bytes, body: Dict[str, Any]) -> None:
+        messages = body.get("messages")
+        if not isinstance(messages, list) or not messages:
+            raise GatewayRequestError(400, "invalid_request_error", "messages must be a non-empty array.")
+        requested = body.get("model")
+        if not isinstance(requested, str) or not requested.strip():
+            raise GatewayRequestError(400, "invalid_request_error", "model is required.")
+        max_tokens = body.get("max_tokens")
+        if max_tokens is not None and (not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or max_tokens < 1):
+            raise GatewayRequestError(400, "invalid_request_error", "max_tokens must be a positive integer.")
+
+        session_id = derive_session_id(body, self.headers)
+        est_input = estimate_anthropic_input_tokens(body)
+        decision = classify_and_route(
+            session_id=session_id,
+            requested_model=requested,
+            messages=messages,
+            token_count_est=est_input,
+            is_summary=bool(body.get("context_management")),
+            # Not a Claude Code field; honoured if a custom client sets it.
+            subagent_flag=body.get("isSubagent") is True,
+        )
+        provider, model = parse_selected_model(decision["selected_model"])
+        log_event("route", session=session_digest(session_id), requested=str(requested)[:80],
+                  model=f"{provider}/{model}", rule=decision["rule_matched"], input_tokens=est_input)
+        if provider == "anthropic":
+            self._proxy_anthropic(raw, body, session_id, decision, model, est_input)
+        else:
+            self._serve_gemini(body, session_id, decision, model, est_input)
+
+    @staticmethod
+    def _decision_header(decision: Dict[str, Any]) -> Dict[str, str]:
+        return {"X-Gemini4-Gateway": f"model={decision['selected_model']}; rule={decision['rule_matched']}"}
+
+    def _serve_gemini(self, body: Dict[str, Any], session_id: str, decision: Dict[str, Any],
+                      model: str, est_input: int) -> None:
+        payload = translate_anthropic_to_gemini_payload(body, model)
+        url, headers = gemini_endpoint(model)
+        max_out = payload["generationConfig"]["maxOutputTokens"]
+        allowed, reservation, message = reserve_budget(session_id, model, est_input, max_out)
+        if not allowed:
+            raise GatewayRequestError(403, "permission_error", message)
+        timeout_s = 1200 if "argon" in model else 300
+        outcome: Dict[str, Any] = {}
+        done = threading.Event()
+        digest = session_digest(session_id)
+
+        def worker() -> None:
+            try:
+                gem_resp = call_gemini(url, headers, payload, timeout_s)
+                msg = gemini_response_to_anthropic(gem_resp, f"claude-{model}")
+                settle_budget(session_id, reservation, cost_from_gemini_usage(model, gem_resp.get("usageMetadata")))
+                usage = msg["usage"]
+                log_event("upstream", session=digest, model=model, rule=decision["rule_matched"], status=200,
+                          input_tokens=usage["input_tokens"], cached_tokens=usage["cache_read_input_tokens"],
+                          output_tokens=usage["output_tokens"])
+                outcome["message"] = msg
+            except GatewayRequestError as err:
+                settle_budget(session_id, reservation, None)
+                log_event("upstream", session=digest, model=model, rule=decision["rule_matched"], status=err.status)
+                outcome["error"] = err
+            except Exception as exc:
+                settle_budget(session_id, reservation, None)
+                log_event("upstream", session=digest, model=model, status=500, rule=type(exc).__name__)
+                outcome["error"] = GatewayRequestError(500, "api_error", "Internal gateway error.")
+            finally:
+                done.set()
+
+        threading.Thread(target=worker, daemon=True).start()
+        extra = self._decision_header(decision)
+
+        if body.get("stream") is not True:
+            done.wait()
+            if "error" in outcome:
+                raise outcome["error"]
+            self._send_json(200, outcome["message"], extra)
             return
 
-        if route.startswith("/v1/messages/count_tokens"):
-            est = estimate_anthropic_input_tokens(body)
-            self._send_json(200, {"input_tokens": est})
-            return
+        # Streaming: if the call finishes before the first ping is due, errors keep their status code.
+        if not done.wait(PING_INTERVAL_S):
+            self._begin(200, "text/event-stream; charset=utf-8", extra)
+            self.end_headers()
+            self.close_connection = True
+            while not done.wait(PING_INTERVAL_S):
+                if not self._write(PING_FRAME):
+                    return
+        elif "error" in outcome:
+            raise outcome["error"]
+        else:
+            self._begin(200, "text/event-stream; charset=utf-8", extra)
+            self.end_headers()
+            self.close_connection = True
 
-        if route.startswith("/v1/messages"):
-            messages = body.get("messages", [])
-            session_id = (
-                (body.get("metadata") or {}).get("user_id")
-                or self.headers.get("x-session-id")
-                or hashlib.sha256(json.dumps(messages[:1]).encode("utf-8")).hexdigest()[:12]
-            )
-            est_tokens = estimate_anthropic_input_tokens(body)
-            decision = classify_and_route(
-                session_id=session_id,
-                requested_model=body.get("model", "claude-opus-5-5[1m]"),
-                messages=messages,
-                token_count_est=est_tokens,
-                is_summary=bool(body.get("context_management")),
-                has_safeguards=bool(body.get("safeguards")),
-                subagent_flag=bool(body.get("isSubagent")),
-            )
-            allowed, projected_usd, cap_usd = check_and_record_budget(
-                session_id, decision["selected_model"], est_tokens
-            )
-            if not allowed:
-                self._send_json(
-                    403,
-                    {
-                        "type": "error",
-                        "error": {
-                            "type": "permission_error",
-                            "message": (
-                                f"Session `{session_id}` projected spend (${projected_usd:.4f}) exceeds "
-                                f"GEMINI4_SESSION_BUDGET_USD (${cap_usd:.4f})."
-                            ),
-                        },
-                    },
-                    decision=decision,
-                )
+        if "error" in outcome:
+            err = outcome["error"]
+            self._write(_sse_frame("error", anthropic_error_body(err.err_type, err.message)))
+            return
+        for frame in anthropic_sse_events(outcome["message"]):
+            if not self._write(frame):
                 return
 
-            resp = forward_or_mock_anthropic_or_gemini(
-                decision["selected_model"], body, decision, session_id
-            )
-            if body.get("stream") is True:
-                self._send_sse(format_anthropic_sse_stream(resp), decision=decision)
-            else:
-                self._send_json(200, resp, decision=decision)
-            return
-
-        if (
-            route.startswith("/v1/responses")
-            or route.startswith("/v1/chat/completions")
-            or route.startswith("/cursor")
-        ):
-            session_id = (
-                body.get("conversation")
-                or self.headers.get("x-session-id")
-                or "codex-or-cursor-session"
-            )
-            sanitized_body, stripped_fields = sanitize_openai_compat_payload(body)
-            raw_input = sanitized_body.get("input") or sanitized_body.get("messages") or []
-            if isinstance(raw_input, str):
-                messages = [{"role": "user", "content": raw_input}]
-            else:
-                messages = raw_input
-            tools = sanitized_body.get("tools", [])
-            rewrote_apply_patch = any(
-                isinstance(t, dict) and (t.get("type") == "apply_patch" or t.get("name") == "apply_patch")
-                for t in tools
-            )
-            est_tokens = max(1, len(json.dumps(messages)) // 4)
-            decision = classify_and_route(
-                session_id=session_id,
-                requested_model=sanitized_body.get("model", "claude-gemini-4-argon"),
-                messages=messages,
-                token_count_est=est_tokens,
-            )
-            if stripped_fields:
-                decision["protocol_fixes_applied"].append(
-                    f"Stripped unsupported Gemini OpenAI-compat fields: {', '.join(sorted(stripped_fields))}"
-                )
-            if rewrote_apply_patch:
-                decision["protocol_fixes_applied"].append(
-                    "Rewrote Codex freeform `apply_patch` -> `virtual_apply_patch` Lark grammar"
-                )
-
-            allowed, projected_usd, cap_usd = check_and_record_budget(
-                session_id, decision["selected_model"], est_tokens
-            )
-            if not allowed:
-                self._send_json(
-                    403,
-                    {
-                        "error": {
-                            "type": "insufficient_quota",
-                            "code": "session_budget_exceeded",
-                            "message": (
-                                f"Session `{session_id}` projected spend (${projected_usd:.4f}) exceeds "
-                                f"GEMINI4_SESSION_BUDGET_USD (${cap_usd:.4f})."
-                            ),
-                        }
-                    },
-                    decision=decision,
-                )
+    def _proxy_anthropic(self, raw: bytes, body: Dict[str, Any], session_id: str, decision: Dict[str, Any],
+                         model: str, est_input: int) -> None:
+        """Forward the original request bytes to api.anthropic.com and relay the response unchanged."""
+        key = (os.environ.get("ANTHROPIC_UPSTREAM_KEY") or "").strip()
+        if not key:
+            raise GatewayRequestError(401, "authentication_error",
+                                      "ANTHROPIC_UPSTREAM_KEY is not set; cannot forward to api.anthropic.com.")
+        allowed, reservation, message = reserve_budget(session_id, model, est_input, resolve_max_output_tokens(body))
+        if not allowed:
+            raise GatewayRequestError(403, "permission_error", message)
+        headers = {
+            "content-type": self.headers.get("content-type") or "application/json",
+            "anthropic-version": self.headers.get("anthropic-version") or "2023-06-01",
+            "x-api-key": key,
+        }
+        beta = self.headers.get("anthropic-beta")
+        if beta:
+            headers["anthropic-beta"] = beta
+        req = urllib.request.Request(ANTHROPIC_MESSAGES_URL, data=raw, headers=headers, method="POST")
+        digest = session_digest(session_id)
+        try:
+            upstream = urllib.request.urlopen(req, timeout=ANTHROPIC_TIMEOUT_S, context=_ssl_context())
+        except urllib.error.HTTPError as err:
+            settle_budget(session_id, reservation, None)
+            log_event("upstream", session=digest, model=model, rule=decision["rule_matched"], status=err.code)
+            if err.code in (429, 529) and gemini_credentials_available():
+                err.close()
+                target = "gemini-4-argon"
+                pin_failover(session_id, f"gemini/{target}", len(body.get("messages") or []))
+                decision = dict(decision, selected_model=f"gemini/{target}", rule_matched="live_429_sticky_failover")
+                log_event("failover", session=digest, model=target, rule=decision["rule_matched"])
+                self._serve_gemini(body, session_id, decision, target, est_input)
                 return
-
-            bare_model = strip_virtual_wrappers(decision["selected_model"].split("/", 1)[-1])
-            out_text = (
-                f"[Gemini 4 Responses/Cursor Bridge -> `{bare_model}`] "
-                f"Routed via `{decision['rule_matched']}`."
-            )
-
-            if route.startswith("/v1/chat/completions") or route.startswith("/cursor"):
-                if sanitized_body.get("stream") is True:
-                    chunk = {
-                        "id": f"chatcmpl_{uuid.uuid4().hex[:14]}",
-                        "object": "chat.completion.chunk",
-                        "model": bare_model,
-                        "choices": [
-                            {
-                                "index": 0,
-                                "delta": {"role": "assistant", "content": out_text},
-                                "finish_reason": "stop",
-                            }
-                        ],
-                    }
-                    self._send_sse(
-                        f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n".encode("utf-8"),
-                        decision=decision,
-                    )
-                else:
-                    self._send_json(
-                        200,
-                        {
-                            "id": f"chatcmpl_{uuid.uuid4().hex[:14]}",
-                            "object": "chat.completion",
-                            "model": bare_model,
-                            "choices": [
-                                {
-                                    "index": 0,
-                                    "message": {"role": "assistant", "content": out_text},
-                                    "finish_reason": "stop",
-                                }
-                            ],
-                            "x_gemini4_gateway": decision,
-                        },
-                        decision=decision,
-                    )
-                return
-
-            resp_obj = {
-                "id": f"resp_{uuid.uuid4().hex[:18]}",
-                "object": "response",
-                "status": "completed",
-                "model": bare_model,
-                "output": [
-                    {
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [{"type": "output_text", "text": out_text}],
-                    }
-                ],
-                "x_gemini4_gateway": decision,
-            }
-            if sanitized_body.get("stream") is True:
-                sse = (
-                    f"event: response.created\ndata: {json.dumps({'type': 'response.created', 'response': resp_obj})}\n\n"
-                    f"event: response.output_text.delta\ndata: {json.dumps({'type': 'response.output_text.delta', 'delta': out_text})}\n\n"
-                    f"event: response.completed\ndata: {json.dumps({'type': 'response.completed', 'response': resp_obj})}\n\n"
-                ).encode("utf-8")
-                self._send_sse(sse, decision=decision)
-            else:
-                self._send_json(200, resp_obj, decision=decision)
+            try:
+                self._relay(err, None, decision)
+            finally:
+                err.close()
             return
+        except (socket.timeout, TimeoutError):
+            settle_budget(session_id, reservation, None)
+            raise GatewayRequestError(504, "api_error", "Request to api.anthropic.com timed out.")
+        except (urllib.error.URLError, OSError) as err:
+            settle_budget(session_id, reservation, None)
+            raise GatewayRequestError(502, "api_error", f"Request to api.anthropic.com failed ({type(err).__name__}).")
 
-        self._send_json(404, {"error": f"Unsupported endpoint: {self.path}"})
+        ctype = upstream.headers.get("Content-Type") or ""
+        tracker = AnthropicUsageTracker(is_sse="text/event-stream" in ctype)
+        try:
+            self._relay(upstream, tracker, decision)
+        finally:
+            upstream.close()
+            usage = tracker.finish()
+            # If usage could not be read, keep the reservation as the charge.
+            actual = cost_from_anthropic_usage(model, usage) if usage else reservation
+            settle_budget(session_id, reservation, actual)
+            usage = usage or {}
+            log_event("upstream", session=digest, model=model, rule=decision["rule_matched"],
+                      status=getattr(upstream, "status", None), input_tokens=usage.get("input_tokens"),
+                      cached_tokens=usage.get("cache_read_input_tokens"), output_tokens=usage.get("output_tokens"))
+
+    def _relay(self, resp: Any, tracker: Optional[AnthropicUsageTracker], decision: Dict[str, Any]) -> None:
+        status = getattr(resp, "status", None) or getattr(resp, "code", 502)
+        resp_headers = resp.headers
+        extra = self._decision_header(decision)
+        for name in _RELAYED_RESPONSE_HEADERS:
+            if resp_headers.get(name):
+                extra[name] = resp_headers.get(name)
+        for name, value in resp_headers.items():
+            if name.lower().startswith("anthropic-ratelimit-"):
+                extra[name] = value
+        self._begin(status, resp_headers.get("Content-Type") or "application/json", extra)
+        length = resp_headers.get("Content-Length")
+        if length and not resp_headers.get("Transfer-Encoding"):
+            self.send_header("Content-Length", length)
+        self.end_headers()
+        self.close_connection = True
+        reader = getattr(resp, "read1", None)
+        while True:
+            chunk = reader(65536) if reader else resp.read(65536)
+            if not chunk:
+                break
+            if tracker is not None:
+                tracker.feed(chunk)
+            if not self._write(chunk):
+                break
 
 
 class ReusableGatewayHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
+    daemon_threads = True
+
+    def __init__(self, server_address: Tuple[str, int], handler_class: Any, token: Optional[str] = None) -> None:
+        super().__init__(server_address, handler_class)
+        if token is None:
+            token, _, _ = load_or_create_token()
+        self.gateway_token = token
 
 
 def run_server(port: int = GATEWAY_PORT) -> None:
-    server = ReusableGatewayHTTPServer(("127.0.0.1", port), GatewayHandler)
-    print(
-        f"[gemini4-gateway v1.3] Listening on http://127.0.0.1:{port} "
-        f"(Claude Code / Codex v0.159+ / Cursor)",
-        flush=True,
-    )
-    server.serve_forever()
+    token, path, created = load_or_create_token()
+    if path is None:
+        print("[gemini4-gateway] Using token from GEMINI4_GATEWAY_TOKEN.", file=sys.stderr, flush=True)
+    else:
+        verb = "Created" if created else "Using"
+        print(f"[gemini4-gateway] {verb} token file: {path}", file=sys.stderr, flush=True)
+    server = ReusableGatewayHTTPServer(("127.0.0.1", port), GatewayHandler, token=token)
+    print(f"[gemini4-gateway {VERSION}] Listening on http://127.0.0.1:{port}", file=sys.stderr, flush=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+
+
+def main(argv: Optional[Iterable[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description="Local Anthropic Messages API gateway for Gemini.")
+    parser.add_argument("--port", type=int, default=GATEWAY_PORT, help="Port to listen on (default: %(default)s)")
+    parser.add_argument("--print-token-path", action="store_true", help="Print the gateway token file path and exit")
+    args = parser.parse_args(list(argv) if argv is not None else None)
+    if args.print_token_path:
+        print(token_file_path())
+        return 0
+    run_server(args.port)
+    return 0
 
 
 if __name__ == "__main__":
-    run_server()
+    sys.exit(main())

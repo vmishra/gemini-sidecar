@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "gemini4": {
+      "command": "python3",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/mcp/gemini4_mcp_server.py"],
+      "env": {
+        "GEMINI4_PLUGIN_API_KEY": "${user_config.gemini_api_key}",
+        "GEMINI4_PLUGIN_USE_VERTEX": "${user_config.use_vertex}",
+        "GEMINI4_PLUGIN_GCP_PROJECT": "${user_config.gcp_project}",
+        "GEMINI4_PLUGIN_PRIMARY_MODEL": "${user_config.primary_model}",
+        "GEMINI4_PLUGIN_SUBAGENT_MODEL": "${user_config.subagent_model}",
+        "GEMINI4_PLUGIN_BACKGROUND_MODEL": "${user_config.background_model}",
+        "GEMINI4_PLUGIN_SECURITY_MODEL": "${user_config.security_model}"
+      }
+    }
+  }
+}

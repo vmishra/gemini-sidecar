@@ -1,24 +1,19 @@
 ---
-description: Cost-optimal Gemini 4 Argon & Gemini 3.8 Flash coexistence rules for Cursor IDE (Post-Oct 2026 Token Rate architecture). Preserves prompt caches, avoids $0.25/M Token Rate surcharges on subagents, and works around Cursor Forum Issue #176256.
-alwaysApply: true
+description: When to use the gemini4 MCP tools for large reads, security review, diff review and long generations.
+alwaysApply: false
 ---
 
-# Gemini 4 Coexistence & Cache-Preserving Offload Strategy (Cursor Nov 2026)
+# Gemini MCP tools
 
-## 1. Cursor Post-Oct 2026 Billing & `Auto` Pool Reality
-- Cursor's `Auto` router selects **only** from `{GPT-5.5, Claude Opus 5, Grok 4.6, Claude Fable 5}` — it **never** auto-routes to Gemini models.
-- Cursor adds a **`$0.25 / 1M` Cursor Token Rate surcharge** on `gemini-4-argon`, **but explicitly EXEMPTS `gemini-3.8-flash` (`$0.75 / $3.75`) and `gemini-3.5-flash-lite` (`$0.30 / $2.50`)**!
-- **Plan / Build Split**:
-  1. **Plan Mode (`Shift+Tab`)**: Pin explicitly to **`gemini-4-argon`** (`52.8%` CursorBench — tied #1 with Opus 5.5; `#1` tied on Endor Labs' 200-task Cursor Agent Security League) or `claude-opus-5-5` (never `Auto`, per Issue #176256 below).
-  2. **Build & MCP-Heavy Execution**: Execute routine implementation and multi-step MCP tool loops on **`gemini-3.8-flash`** (`133 tok/s`, `$0` Cursor surcharge) or **`composer-2.5`** (reduces MCP-heavy token burn by **~47%** vs frontier reasoning models).
+The `gemini4` MCP server reads files from disk and sends them to Gemini, returning only a short answer. Prefer it over reading many files into the conversation:
 
-## 2. Workaround for Cursor Forum Issue #176256 (Oct 26, 2026)
-- **Bug #1 (Parent `Auto`/`Grok` Allowlist)**: If the parent Cursor Composer session is set to `Auto` or `Grok`, invoking `.cursor/agents/*.md` pinned to `gemini-3.8-flash` or `gemini-4-argon` fails allowlist validation. **Fix**: Explicitly select `claude-opus-5-5`, `claude-sonnet-5-5`, or `gemini-4-argon` on the parent session when spawning Gemini subagents.
-- **Bug #2 (Personal Google BYOK Override & ZDR Loss)**: Toggling a personal Google AI Studio BYOK key in Cursor Settings silently forces *all* Task subagents onto `gemini-4-argon` and **voids Enterprise Zero Data Retention (ZDR)** (routing prompts through Cursor's AWS Bedrock/infra). **Fix**: Use native Cursor Enterprise credits OR route through an enterprise LiteLLM Proxy (`https://<proxy>/cursor` using `litellm-gemini-3.8-flash` and `litellm-gemini-4-argon`).
+- Questions spanning many files: `gemini4_analyze_codebase` (`model_tier: "pro"` for cross-module reasoning).
+- Security review: `gemini4_security_audit`.
+- Reviewing uncommitted changes or a branch: `gemini4_review_diff`.
+- Large generated changes (refactors, test suites, docs): `gemini4_long_decode_refactor`. Output is staged in `.gemini4-staging/<run>/` for review.
+- Test failures: write the output to `.gemini4-staging/test-output.log`, then call `gemini4_triage_failures`.
+- Second opinion on a plan: `ask_antigravity`.
 
-## 3. Zero-Cache-Penalty Offloading Rules
-1. **Never Switch Root Composer Models Mid-Thread**: Switching models mid-conversation invalidates your prompt cache. Spawn isolated `.cursor/agents/` subagents or call `gemini4` MCP file-pointer tools instead.
-2. **Delegate Exploration & Test Triage to `gemini4-explorer`** (`model: gemini-3.8-flash[effort=low]`):
-   - Zero `$0.25/M` Cursor surcharge, `133 tok/s`, `89.4%` Terminal-Bench 2.1.
-3. **Delegate Security & 1M Repo Synthesis to `gemini4-security-auditor`** (`model: gemini-4-argon[effort=high]`) or MCP `gemini4_security_audit` / `ask_antigravity`:
-   - Pass workspace-relative `paths` (never paste raw source files into tool arguments).
+Pass workspace-relative paths, never file contents. Verify cited lines before editing.
+
+Model choice: switching the Composer model mid-conversation discards the prompt cache. Prefer delegating to the subagents in `.cursor/agents/` or to these MCP tools rather than switching the parent model.

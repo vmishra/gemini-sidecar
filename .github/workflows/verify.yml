@@ -10,8 +10,8 @@ permissions:
   contents: read
 
 jobs:
-  hermetic-suites:
-    name: Hermetic Suites (${{ matrix.os }} · Python ${{ matrix.python }})
+  verify:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -26,21 +26,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python }}
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
 
-      - name: Set up Node.js (for CCR router suite)
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
-      - name: Run Read-Only Environment Doctor (JSON)
+      - name: Doctor (read-only)
         run: ./install.sh --doctor --json
 
-      - name: Run Dry-Run Installer Smoke Check
-        run: ./install.sh --all --dry-run
+      - name: Installer dry run
+        run: ./install.sh --codex --cursor --gateway-profile all-gemini --project "$RUNNER_TEMP" --dry-run
 
-      - name: Run All 7 Hermetic Verification Suites
+      - name: Offline checks and unit tests
         run: ./verify.sh
