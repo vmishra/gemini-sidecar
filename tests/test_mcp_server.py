@@ -559,10 +559,18 @@ class PreReleaseSecurityTests(Workspace):
     def test_secret_assignment_regex_is_bounded(self):
         import time as _t
         start = _t.time()
-        for text in ("a_" * 100_000 + "password", ("password_token_secret_" * 20_000),
-                     "export " + "A" * 100_000 + "_TOKEN=" + "v" * 100_000):
+        for text in ("a_" * 100_000 + "password", ("password_token_secret_" * 20_000), "token" * 100_000,
+                     "export " + "A" * 100_000 + "_TOKEN=" + "v" * 100_000, "token:" * 100_000):
             srv.redact_secrets(text)
-        self.assertLess(_t.time() - start, 2.0)
+        self.assertLess(_t.time() - start, 3.0)
+
+    def test_long_values_and_long_name_prefixes_are_still_redacted(self):
+        for text in ("API_TOKEN=" + "v" * 2_000, "X" * 200 + "_PASSWORD=hunter2secret",
+                     "X" * 200 + '_secret = "abcdefgh123"', 'password = "' + "v" * 2_000 + '"'):
+            out, n = srv.redact_secrets(text)
+            self.assertEqual(n, 1, text[:40])
+            self.assertNotIn("v" * 50, out)
+            self.assertNotIn("hunter2secret", out)
 
     def test_gitignored_files_skipped_even_when_named(self):
         (self.root / "local_settings.py").write_text("DB = 'prod'\n")

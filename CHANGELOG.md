@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.3.2 (2026-11-04)
+
+### Security
+- Secret-named assignments are redacted by a linear-time scanner instead of regular expressions. This fixes a 2.3.1 regression where values over 512 characters or variable names with long prefixes were not redacted, and removes the remaining slow-regex input.
+
 ## 2.3.1 (2026-11-04)
 
 ### Security

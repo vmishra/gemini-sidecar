@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Dict, List, Optional, Tuple
 
 SERVER_NAME = "gemini4"
-SERVER_VERSION = "2.3.1"
+SERVER_VERSION = "2.3.2"
 DEFAULT_PROTOCOL_VERSION = "2025-06-18"
 
 _RPC_OUT: BinaryIO = sys.stdout.buffer
@@ -176,14 +176,6 @@ SECRET_CONTENT_PATTERNS: List[Tuple[str, "re.Pattern[str]"]] = [
     ("url-credentials", re.compile(
         r"(?<=://)(?:[^\s'\"/@:<>]{1,256}:[^\s'\"<>]{1,512}|[A-Za-z0-9_\-]{12,512})"
         r"(?=@[A-Za-z0-9.\-]+(?:[:/?#\s'\"]|$))")),
-    # Secret-named assignments, but only literal values: a quoted string, or a whole NAME=value line
-    # (.env style). Code expressions such as `token = request.headers.get(...)` are left intact.
-    ("secret-assignment", re.compile(
-        r"(?i)(?<![A-Za-z0-9_])((?:[A-Za-z0-9_]{0,64}_)?" + _SECRET_NAME + r"[A-Za-z0-9_]{0,64}[\"']?[ \t]{0,16}[:=][ \t]{0,16})"
-        r"([\"'])([^\"'\s]{6,})\2")),
-    ("secret-assignment", re.compile(
-        r"(?im)^([ \t]{0,32}(?:export[ \t]+)?[A-Za-z0-9_]{0,64}" + _SECRET_NAME + r"[A-Za-z0-9_]{0,64}[ \t]{0,16}=[ \t]{0,16})"
-        r"([^\s\"'#()]{6,512})[ \t]*$")),
 ]
 
 
@@ -285,12 +277,51 @@ def _redact_private_keys(text: str) -> Tuple[str, int]:
     return "".join(out), count
 
 
+# Identifier followed by = or : (starts only at identifier boundaries, so scanning stays linear).
+_ASSIGN_RE = re.compile(r"(?<![A-Za-z0-9_])([A-Za-z0-9_]+)([\"']?[ \t]*[:=][ \t]*)")
+_SECRET_NAME_RE = re.compile(_SECRET_NAME, re.I)
+_ENV_VALUE_STOP = set(" \t\"'#()=")
+
+
+def _redact_secret_assignments(text: str) -> Tuple[str, int]:
+    """Redact literal values assigned to secret-named variables: a quoted string, or a single unspaced
+    value running to the end of the line (.env / YAML style). Code expressions are left alone.
+    Linear time, no length limits."""
+    out: List[str] = []
+    pos = count = 0
+    n = len(text)
+    for m in _ASSIGN_RE.finditer(text):
+        if m.start() < pos or not _SECRET_NAME_RE.search(m.group(1)):
+            continue
+        i = m.end()
+        if i < n and text[i] in "\"'":
+            quote = text[i]
+            j = text.find(quote, i + 1)
+            value = text[i + 1:j] if j != -1 else ""
+            if j != -1 and len(value) >= 6 and not any(c.isspace() for c in value):
+                out.append(text[pos:i + 1])
+                out.append("[REDACTED:secret-assignment]")
+                pos = j
+                count += 1
+            continue
+        k = text.find("\n", i)
+        k = n if k == -1 else k
+        value = text[i:k].rstrip(" \t\r")
+        if len(value) >= 6 and not any(c in _ENV_VALUE_STOP for c in value):
+            out.append(text[pos:i])
+            out.append("[REDACTED:secret-assignment]")
+            pos = i + len(value)
+            count += 1
+    out.append(text[pos:])
+    return "".join(out), count
+
+
 def redact_secrets(text: str) -> Tuple[str, int]:
     text, count = _redact_private_keys(text)
+    text, n = _redact_secret_assignments(text)
+    count += n
     for label, pattern in SECRET_CONTENT_PATTERNS:
-        if label == "secret-assignment" and pattern.groups == 3:  # quoted literal: keep the quotes
-            text, n = pattern.subn(lambda m: m.group(1) + m.group(2) + f"[REDACTED:{label}]" + m.group(2), text)
-        elif label in ("aws-secret-key", "secret-assignment"):
+        if label == "aws-secret-key":
             text, n = pattern.subn(lambda m: m.group(1) + f"[REDACTED:{label}]", text)
         else:
             text, n = pattern.subn(f"[REDACTED:{label}]", text)
