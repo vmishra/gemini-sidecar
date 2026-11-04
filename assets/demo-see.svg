@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 464" width="760" height="464" role="img" aria-label="Claude Code · /gemini:see">
+<title>Claude Code · /gemini:see</title>
+<rect x="1" y="1" width="758" height="462" rx="10" fill="#0D1117" stroke="#30363D"/>
+<rect x="1" y="1" width="758" height="34" rx="10" fill="#161B22"/><rect x="1" y="25" width="758" height="10" fill="#161B22"/>
+<circle cx="22" cy="18" r="6" fill="#FF5F56"/><circle cx="42" cy="18" r="6" fill="#FFBD2E"/><circle cx="62" cy="18" r="6" fill="#27C93F"/>
+<text x="380.0" y="22" text-anchor="middle" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif" font-size="12.5" fill="#8B949E">Claude Code · /gemini:see</text>
+<g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">
+<text x="22" y="58"><tspan fill="#85E89D" font-weight="700">❯ </tspan><tspan fill="#FFFFFF" font-weight="700">/gemini:see screens/cart.png web/ the total is wrong</tspan></text>
+<text x="22" y="77"><tspan fill="#E6E8EB"></tspan></text>
+<text x="22" y="96"><tspan fill="#B392F0">⏺ </tspan><tspan fill="#B392F0">gemini4 · gemini4_visual_debug(media: [cart.png])</tspan></text>
+<text x="22" y="115"><tspan fill="#8B949E">  ⎿ 1 image + 2 source files</tspan></text>
+<text x="22" y="134"><tspan fill="#E6E8EB"></tspan></text>
+<text x="22" y="153"><tspan fill="#E6E8EB">On screen: Bag shows price undefined and the</tspan></text>
+<text x="22" y="172"><tspan fill="#E6E8EB">total reads &quot;Total: $NaN&quot;.</tspan></text>
+<text x="22" y="191"><tspan fill="#E6E8EB"></tspan></text>
+<text x="22" y="210"><tspan fill="#FFFFFF" font-weight="700">Cause</tspan></text>
+<text x="22" y="229"><tspan fill="#E6E8EB">  web/cart.js:1  the Bag item has no price</tspan></text>
+<text x="22" y="248"><tspan fill="#E6E8EB">  web/cart.js:6  1 * undefined = NaN, and sum</tspan></text>
+<text x="22" y="267"><tspan fill="#E6E8EB">                 stays NaN from then on</tspan></text>
+<text x="22" y="286"><tspan fill="#E6E8EB">  web/cart.js:8  NaN.toFixed(2) prints &quot;NaN&quot;</tspan></text>
+<text x="22" y="305"><tspan fill="#E6E8EB"></tspan></text>
+<text x="22" y="324"><tspan fill="#E6E8EB">Gemini suggests price: 0. I&#x27;d rather not: it hides</tspan></text>
+<text x="22" y="343"><tspan fill="#E6E8EB">the bug by giving the bag away. Add the real price,</tspan></text>
+<text x="22" y="362"><tspan fill="#E6E8EB">and make the total fail loudly on a missing one.</tspan></text>
+<text x="22" y="381"><tspan fill="#E6E8EB"></tspan></text>
+<text x="22" y="400"><tspan fill="#8B949E">  ───</tspan></text>
+<text x="22" y="419"><tspan fill="#9ECBFF">  gemini-3.8-flash | 6.4s | 1,518 in / 786 out | ~$0.004</tspan></text>
+</g></svg>

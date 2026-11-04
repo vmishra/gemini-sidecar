@@ -356,6 +356,93 @@ class GeminiCallTests(Workspace):
             self.assertTrue(srv.resolve_credentials()["use_vertex"])
 
 
+def grounded_reply(text: str) -> FakeResponse:
+    body = {
+        "candidates": [{"content": {"parts": [{"text": text}]}, "finishReason": "STOP",
+                        "groundingMetadata": {"webSearchQueries": ["requests cve"],
+                                              "groundingChunks": [{"web": {"uri": "https://example.org/a", "title": "example.org"}},
+                                                                  {"web": {"uri": "https://example.org/a", "title": "dup"}}]}}],
+        "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 5},
+    }
+    return FakeResponse(json.dumps(body).encode())
+
+
+class GeminiStrengthToolTests(Workspace):
+    def call(self, name, args, reply=None):
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "k"}), \
+             mock.patch.object(srv.urllib.request, "urlopen", return_value=reply or gemini_reply("ok")) as op:
+            res = srv.handle_request({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                      "params": {"name": name, "arguments": args}})["result"]
+        body = json.loads(op.call_args[0][0].data) if op.called else None
+        return res, body
+
+    def test_deps_autodetects_manifests_and_uses_search_grounding(self):
+        (self.root / "requirements.txt").write_text("requests==2.25.0\nflask[async]>=1.1,<2  # web\n")
+        (self.root / "web").mkdir()
+        (self.root / "web" / "package.json").write_text('{"dependencies": {"lodash": "^4.17.0"}}')
+        res, body = self.call("gemini4_check_dependencies", {}, grounded_reply("table"))
+        self.assertFalse(res["isError"])
+        self.assertEqual(body["tools"], [{"googleSearch": {}}])
+        prompt = body["contents"][0]["parts"][-1]["text"]
+        self.assertIn("- requests ==2.25.0  (requirements.txt)", prompt)
+        self.assertIn("- flask >=1.1,<2  (requirements.txt)", prompt)
+        self.assertIn("- lodash ^4.17.0  (web/package.json)", prompt)
+        text = res["content"][0]["text"]
+        self.assertIn("**Sources**", text)
+        self.assertEqual(text.count("https://example.org/a"), 1)
+
+    def test_deps_without_manifests_is_an_error(self):
+        res, _ = self.call("gemini4_check_dependencies", {})
+        self.assertTrue(res["isError"])
+
+    def test_spec_check_sends_pdf_inline(self):
+        (self.root / "spec.pdf").write_bytes(b"%PDF-1.4 fake")
+        res, body = self.call("gemini4_spec_check", {"spec": "spec.pdf", "paths": ["src/app.py"]})
+        self.assertFalse(res["isError"])
+        part = body["contents"][0]["parts"][0]["inlineData"]
+        self.assertEqual(part["mimeType"], "application/pdf")
+        self.assertNotIn("tools", body)
+
+    def test_spec_check_url_uses_url_context(self):
+        res, body = self.call("gemini4_spec_check", {"spec": "https://www.rfc-editor.org/rfc/rfc6585", "paths": ["src/"]})
+        self.assertFalse(res["isError"])
+        self.assertEqual(body["tools"], [{"urlContext": {}}])
+        self.assertIn("rfc6585", body["contents"][0]["parts"][-1]["text"])
+
+    def test_spec_check_text_spec_is_read_as_text(self):
+        (self.root / "SPEC.md").write_text("The API MUST return 429.\n")
+        res, body = self.call("gemini4_spec_check", {"spec": "SPEC.md", "paths": ["src/app.py"]})
+        self.assertFalse(res["isError"])
+        self.assertIn("MUST return 429", body["contents"][0]["parts"][-1]["text"])
+
+    def test_visual_debug_sends_image_and_video(self):
+        (self.root / "shot.png").write_bytes(b"\x89PNG\r\n\x1a\nfake")
+        (self.root / "rec.mov").write_bytes(b"fake-mov")
+        res, body = self.call("gemini4_visual_debug", {"media": ["shot.png", "rec.mov"], "question": "why?", "paths": ["src/"]})
+        self.assertFalse(res["isError"])
+        mimes = [p["inlineData"]["mimeType"] for p in body["contents"][0]["parts"] if "inlineData" in p]
+        self.assertEqual(mimes, ["image/png", "video/quicktime"])
+
+    def test_media_confinement_type_and_size(self):
+        (self.root / "notes.txt").write_text("x")
+        for media in (["../x.png"], [str(self.outside / "secret.txt")], ["notes.txt"], ["missing.png"]):
+            with self.subTest(media=media):
+                res, _ = self.call("gemini4_visual_debug", {"media": media, "question": "q"})
+                self.assertTrue(res["isError"])
+        (self.root / "big.mp4").write_bytes(b"0" * 2000)
+        with mock.patch.object(srv, "MAX_MEDIA_BYTES", 1000):
+            res, _ = self.call("gemini4_visual_debug", {"media": ["big.mp4"], "question": "q"})
+        self.assertTrue(res["isError"])
+        self.assertIn("limit per call", res["content"][0]["text"])
+
+    def test_architecture_mode_stages_document(self):
+        reply = gemini_reply("<<<FILE ARCHITECTURE.md>>>\n# Architecture\n<<<END FILE>>>\n## Notes\nok")
+        res, body = self.call("gemini4_long_decode_refactor", {"spec": "guide", "paths": ["."], "mode": "architecture"}, reply)
+        self.assertFalse(res["isError"])
+        self.assertIn("ARCHITECTURE.md", res["content"][0]["text"])
+        self.assertIn("Write ARCHITECTURE.md", body["contents"][0]["parts"][-1]["text"])
+
+
 class ProtocolTests(unittest.TestCase):
     def test_stdio_handshake_and_tool_list(self):
         msgs = [
@@ -373,6 +460,7 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(names, {
             "gemini4_analyze_codebase", "gemini4_security_audit", "gemini4_review_diff",
             "gemini4_long_decode_refactor", "gemini4_triage_failures", "ask_antigravity", "gemini4_status",
+            "gemini4_check_dependencies", "gemini4_spec_check", "gemini4_visual_debug",
         })
         self.assertEqual(replies[2]["error"]["code"], -32601)
 

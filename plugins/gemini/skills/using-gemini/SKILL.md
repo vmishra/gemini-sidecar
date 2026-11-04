@@ -1,6 +1,6 @@
 ---
 name: using-gemini
-description: When to hand work to the gemini4 MCP tools instead of reading files directly - large multi-file questions, security review, pre-commit review, long generated output, test-log triage, or a second opinion.
+description: When to hand work to the gemini4 MCP tools instead of reading files directly - large multi-file questions, security review, pre-commit review, long generated output, test-log triage, dependency and CVE checks, spec compliance, screenshots or recordings, or a second opinion.
 user-invocable: false
 ---
 
@@ -15,6 +15,9 @@ The gemini4 MCP tools read files from disk on the server side and return only a 
 | Reviewing a large diff before commit | `gemini4_review_diff` |
 | Generating many files or very long output (migrations, test suites) | `gemini4_long_decode_refactor` (writes to `.gemini4-staging/`) |
 | A long test or build log | Redirect output to `.gemini4-staging/test-output.log`, then `gemini4_triage_failures` |
+| Current versions, CVEs or breaking changes for dependencies | `gemini4_check_dependencies` (live Google Search) |
+| Checking code against a spec, RFC or API doc (PDF, Markdown, URL) | `gemini4_spec_check` |
+| A screenshot or screen recording of a bug | `gemini4_visual_debug` |
 | An independent critique of a plan before a risky change | `ask_antigravity` |
 
 Rules:

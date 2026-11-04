@@ -12,6 +12,9 @@ The `gemini4` MCP server reads files from disk and sends them to Gemini, returni
 - Reviewing uncommitted changes or a branch: `gemini4_review_diff`.
 - Large generated changes (refactors, test suites, docs): `gemini4_long_decode_refactor`. Output is staged in `.gemini4-staging/<run>/` for review.
 - Test failures: write the output to `.gemini4-staging/test-output.log`, then call `gemini4_triage_failures`.
+- Outdated or vulnerable dependencies: `gemini4_check_dependencies` (uses live Google Search).
+- Code vs. a spec (PDF, Markdown or URL): `gemini4_spec_check`.
+- A UI bug in a screenshot or recording: `gemini4_visual_debug`.
 - Second opinion on a plan: `ask_antigravity`.
 
 Pass workspace-relative paths, never file contents. Verify cited lines before editing.

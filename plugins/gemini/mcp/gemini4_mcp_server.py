@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Dict, List, Optional, Tuple
 
 SERVER_NAME = "gemini4"
-SERVER_VERSION = "2.0.0"
+SERVER_VERSION = "2.1.0"
 DEFAULT_PROTOCOL_VERSION = "2025-06-18"
 
 _RPC_OUT: BinaryIO = sys.stdout.buffer
@@ -400,6 +400,118 @@ def collect_files(
     return "\n\n".join(chunks), meta
 
 
+MEDIA_TYPES = {
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp",
+    ".heic": "image/heic", ".heif": "image/heif",
+    ".mp4": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm", ".mpeg": "video/mpeg",
+    ".pdf": "application/pdf",
+}
+# Inline requests are limited to about 20 MB after base64 encoding, so cap the raw bytes.
+MAX_MEDIA_BYTES = _env_int("GEMINI4_MAX_MEDIA_BYTES", 14_000_000)
+
+
+def load_media(paths: List[str], root: Path, allowed: Tuple[str, ...]) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """Inline image/video/PDF parts for files inside the workspace. Same confinement as text files."""
+    import base64
+
+    parts: List[Dict[str, Any]] = []
+    names: List[str] = []
+    total = 0
+    for raw in paths:
+        rel_path = Path(str(raw).strip())
+        if not str(rel_path) or rel_path.is_absolute() or ".." in rel_path.parts:
+            raise ToolError(f"Media path {raw!r} must be workspace-relative.")
+        real = (root / rel_path).resolve()
+        if not _is_within(real, root) or not real.is_file():
+            raise ToolError(f"Media file `{raw}` not found inside the workspace.")
+        rel = os.path.relpath(real, root)
+        if is_secret_file(Path(rel)):
+            raise ToolError(f"`{raw}` looks like a secret file and will not be sent.")
+        mime = MEDIA_TYPES.get(real.suffix.lower())
+        if not mime or not mime.startswith(allowed):
+            kinds = ", ".join(sorted(ext for ext, m in MEDIA_TYPES.items() if m.startswith(allowed)))
+            raise ToolError(f"`{raw}` is not a supported file type here ({kinds}).")
+        size = real.stat().st_size
+        total += size
+        if total > MAX_MEDIA_BYTES:
+            raise ToolError(
+                f"Media is {total / 1e6:.1f} MB in total; the limit per call is {MAX_MEDIA_BYTES / 1e6:.0f} MB. "
+                "Trim the recording, lower its resolution, or send fewer files."
+            )
+        parts.append({"inlineData": {"mimeType": mime, "data": base64.b64encode(real.read_bytes()).decode("ascii")}})
+        names.append(rel)
+    return parts, names
+
+
+MANIFEST_PATTERNS = [
+    "requirements*.txt", "pyproject.toml", "setup.cfg", "setup.py", "Pipfile", "package.json", "go.mod",
+    "Cargo.toml", "pom.xml", "build.gradle", "build.gradle.kts", "Gemfile", "composer.json", "pubspec.yaml",
+    "*.csproj", "mix.exs", "Package.swift",
+]
+
+
+def find_manifests(root: Path, limit: int = 40) -> List[str]:
+    """Dependency manifests in the workspace (lockfiles are skipped: they are large and redundant)."""
+    use_git = _in_git_repo(root)
+    found: List[str] = []
+    for f in _expand_dir(root, root, use_git):
+        rel = os.path.relpath(f, root)
+        if len(Path(rel).parts) > 4:
+            continue
+        if any(fnmatch.fnmatch(Path(rel).name, pat) for pat in MANIFEST_PATTERNS):
+            found.append(rel)
+    return sorted(found)[:limit]
+
+
+_REQ_LINE = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[^\]]*\])?\s*((?:==|>=|<=|~=|!=|>|<|===)\s*[^;#\s]+(?:\s*,\s*(?:==|>=|<=|~=|!=|>|<)\s*[^;#\s,]+)*)?")
+
+
+def parse_declared_dependencies(root: Path, manifests: List[str]) -> List[Tuple[str, str, str]]:
+    """(manifest, package, declared spec) for formats that are easy to parse exactly.
+
+    Gemini sometimes mixes up versions between lines when reading manifests, so the parsed list is
+    passed alongside the raw files as the authoritative record of what is declared.
+    """
+    out: List[Tuple[str, str, str]] = []
+    for rel in manifests:
+        path = root / rel
+        name = path.name.lower()
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if name.startswith("requirements") and name.endswith(".txt"):
+            for line in text.splitlines():
+                line = line.split("#", 1)[0].strip()
+                if not line or line.startswith(("-", "git+", "http")):
+                    continue
+                m = _REQ_LINE.match(line)
+                if m:
+                    out.append((rel, m.group(1), (m.group(2) or "any").replace(" ", "")))
+        elif name == "package.json":
+            try:
+                data = json.loads(text)
+            except ValueError:
+                continue
+            for section in ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies"):
+                for pkg, ver in (data.get(section) or {}).items():
+                    out.append((rel, pkg, str(ver) + ("" if section == "dependencies" else f" ({section})")))
+        elif name == "pyproject.toml":
+            in_deps = False
+            for line in text.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("dependencies") and "[" in stripped:
+                    in_deps = True
+                if in_deps:
+                    for item in re.findall(r'"([^"]+)"', stripped):
+                        m = _REQ_LINE.match(item)
+                        if m:
+                            out.append((rel, m.group(1), (m.group(2) or "any").replace(" ", "")))
+                    if "]" in stripped:
+                        in_deps = False
+    return out
+
+
 def describe_scope(meta: Dict[str, Any]) -> str:
     parts = [f"{meta['files_read']} files, ~{meta['approx_tokens']:,} tokens"]
     sk = meta["skipped"]
@@ -535,17 +647,24 @@ def call_gemini(
     prompt: str,
     thinking_level: str = "medium",
     max_output_tokens: int = 32768,
+    media_parts: Optional[List[Dict[str, Any]]] = None,
+    tools: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """One generateContent call. Returns text, usage, and finish reason or raises ToolError."""
+    """One generateContent call. Returns text, usage, finish reason and any grounding sources,
+    or raises ToolError. `media_parts` (inline images, video, PDF) go before the prompt text;
+    `tools` enables Gemini-side tools such as Google Search grounding or URL context."""
     creds = resolve_credentials()
     gen_cfg: Dict[str, Any] = {"maxOutputTokens": max_output_tokens}
     if "flash-lite" not in model:
         gen_cfg["thinkingConfig"] = {"thinkingLevel": thinking_level.upper()}
-    payload = json.dumps({
+    request: Dict[str, Any] = {
         "systemInstruction": {"parts": [{"text": system}]},
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "contents": [{"role": "user", "parts": list(media_parts or []) + [{"text": prompt}]}],
         "generationConfig": gen_cfg,
-    }).encode("utf-8")
+    }
+    if tools:
+        request["tools"] = tools
+    payload = json.dumps(request).encode("utf-8")
 
     headers = {"Content-Type": "application/json"}
     if creds["api_key"] and not creds["use_vertex"]:
@@ -622,8 +741,16 @@ def call_gemini(
     _record_usage(model, usage)
     if not text.strip():
         raise ToolError(f"Gemini returned an empty answer (finishReason={finish or 'unknown'}).")
+    grounding = cand.get("groundingMetadata") or {}
+    sources: List[Dict[str, str]] = []
+    for chunk in grounding.get("groundingChunks") or []:
+        web = chunk.get("web") or {}
+        if web.get("uri") and all(src["uri"] != web["uri"] for src in sources):
+            sources.append({"title": str(web.get("title") or web.get("domain") or "source"), "uri": str(web["uri"])})
     return {
         "text": text,
+        "sources": sources,
+        "search_queries": list(grounding.get("webSearchQueries") or []),
         "model": model,
         "backend": backend,
         "finish_reason": finish,
@@ -650,6 +777,16 @@ def usage_footer(res: Dict[str, Any], scope: Optional[str] = None) -> str:
     if scope:
         line += f"\nScope: {scope}"
     return line
+
+
+def sources_block(res: Dict[str, Any], limit: int = 15) -> str:
+    """Markdown list of web sources Gemini used (Google Search grounding or URL context)."""
+    if not res.get("sources"):
+        return ""
+    lines = ["", "", "**Sources**"]
+    for src in res["sources"][:limit]:
+        lines.append(f"- [{src['title']}]({src['uri']})")
+    return "\n".join(lines)
 
 
 def _clip(text: str) -> str:
@@ -710,8 +847,39 @@ SYS_SECOND_OPINION = (
     "Be direct and brief. " + UNTRUSTED_NOTE
 )
 
+SYS_DEPS = (
+    "You are checking a project's dependencies against current, real-world information. Use Google Search for "
+    "every direct dependency. Output a Markdown table: Package | Declared version | Latest stable | "
+    "Known vulnerabilities affecting the declared version (ID, fixed in) | Breaking changes to plan for | Action. "
+    "Report a vulnerability only if you found a source for it; otherwise write 'none found'. Put the most urgent "
+    "rows first. After the table, give a short upgrade order and say which upgrades are risky and why. "
+    + UNTRUSTED_NOTE
+)
+
+SYS_SPEC = (
+    "You check whether code implements a specification. First extract the spec's concrete requirements "
+    "(MUST/SHOULD statements, limits, formats, error codes, required behaviours) with their section or page. "
+    "Then check each one against the code. Output a Markdown table: Requirement (spec section) | Status "
+    "(Met, Partial, Missing, Contradicts, Not applicable) | Evidence (path:line) | Notes. Finish with counts per "
+    "status and the three gaps that matter most. Do not mark a requirement Met without code evidence. "
+    + UNTRUSTED_NOTE
+)
+
+SYS_SEE = (
+    "You are given screenshots or a screen recording of an application, plus its source code. Describe what the "
+    "user sees (give timestamps for video), identify the bug, glitch or mismatch, and point to the components and "
+    "lines most likely responsible, citing `path:line`. Finish with the smallest fix. Say when the visuals and the "
+    "code do not match well enough to be sure. " + UNTRUSTED_NOTE
+)
+
 GENERATE_MODES = {
     "refactor": "Apply the following refactor or migration.",
+    "architecture": (
+        "Write ARCHITECTURE.md at the repository root as an onboarding guide for a new engineer: what the project "
+        "does, the main components and their responsibilities (with paths), how a typical request or data flow "
+        "moves through them, key abstractions and conventions, configuration, how to run and test it, where to "
+        "start for common changes, and known sharp edges. Cite paths. Plain Markdown, concise headings."
+    ),
     "tests": (
         "Write thorough automated tests for the provided source files, using the test framework and "
         "conventions already present in the repository. Cover edge cases and error paths. Place test files "
@@ -999,7 +1167,8 @@ TOOLS: List[Dict[str, Any]] = [
             "properties": {
                 "spec": {"type": "string", "description": "What to change, with constraints and acceptance criteria."},
                 "paths": _PATHS,
-                "mode": {"type": "string", "enum": ["refactor", "tests", "docs"], "default": "refactor"},
+                "mode": {"type": "string", "enum": ["refactor", "tests", "docs", "architecture"], "default": "refactor",
+                         "description": "architecture writes an ARCHITECTURE.md onboarding guide for the given paths."},
                 "model_tier": {"type": "string", "enum": ["pro", "flash"], "default": "pro"},
                 "workspace_root": _ROOT,
             },
@@ -1042,6 +1211,66 @@ TOOLS: List[Dict[str, Any]] = [
                 "workspace_root": _ROOT,
             },
             "required": ["prompt"],
+        },
+    },
+    {
+        "name": "gemini4_check_dependencies",
+        "description": (
+            "Check dependency manifests (requirements.txt, pyproject.toml, package.json, go.mod, Cargo.toml, pom.xml, "
+            "...) against live Google Search results: latest versions, known vulnerabilities affecting the declared "
+            "versions, and breaking changes. Returns a table with source links. Finds the manifests itself when "
+            "`paths` is omitted."
+        ),
+        "annotations": {"readOnlyHint": True, "openWorldHint": True},
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "paths": {**_PATHS, "description": "Optional manifest files. Omit to auto-detect."},
+                "focus": {"type": "string", "description": "Optional, e.g. 'security only' or 'plan a Django 5 upgrade'."},
+                "model_tier": {"type": "string", "enum": ["flash", "pro"], "default": "flash"},
+                "workspace_root": _ROOT,
+            },
+        },
+    },
+    {
+        "name": "gemini4_spec_check",
+        "description": (
+            "Check code against a specification: a PDF, Markdown or text file in the workspace, or an http(s) URL. "
+            "Gemini reads the spec natively (PDFs included) next to the code and returns a requirement-by-requirement "
+            "table: Met, Partial, Missing or Contradicts, with path:line evidence."
+        ),
+        "annotations": {"readOnlyHint": True, "openWorldHint": True},
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "spec": {"type": "string", "description": "Workspace-relative spec file (.pdf, .md, .txt, ...) or an https URL."},
+                "paths": {**_PATHS, "description": "Source files or directories that implement the spec."},
+                "focus": {"type": "string", "description": "Optional, e.g. 'error handling sections only'."},
+                "model_tier": {"type": "string", "enum": ["pro", "flash"], "default": "pro"},
+                "workspace_root": _ROOT,
+            },
+            "required": ["spec", "paths"],
+        },
+    },
+    {
+        "name": "gemini4_visual_debug",
+        "description": (
+            "Debug from screenshots or a short screen recording: Gemini watches the images or video next to the "
+            "source code and points to the components and lines responsible for what is on screen. Accepts .png, "
+            ".jpg, .webp, .mp4, .mov and .webm files inside the workspace (up to about 14 MB in total)."
+        ),
+        "annotations": {"readOnlyHint": True, "openWorldHint": True},
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "media": {"type": "array", "items": {"type": "string"},
+                          "description": "Workspace-relative screenshots or recordings."},
+                "question": {"type": "string", "description": "What is wrong, or what to look for."},
+                "paths": {**_PATHS, "description": "Source files or directories for the UI shown."},
+                "model_tier": {"type": "string", "enum": ["flash", "pro"], "default": "flash"},
+                "workspace_root": _ROOT,
+            },
+            "required": ["media", "question"],
         },
     },
     {
@@ -1238,6 +1467,73 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
         )
         res = call_gemini(MODEL_FLASH, SYS_TRIAGE, prompt, thinking_level="medium", max_output_tokens=16384)
         scope = f"log `{log_rel}`" + (f"; {describe_scope(src_meta)}" if src_meta else "")
+        return _clip(res["text"]) + usage_footer(res, scope)
+
+    if name == "gemini4_check_dependencies":
+        manifests = list(args.get("paths") or []) or find_manifests(root)
+        if not manifests:
+            raise ToolError("No dependency manifests found. Pass `paths`, e.g. [\"requirements.txt\"].")
+        corpus, meta = collect_files(manifests, root, numbered=False)  # short files; numbers confuse version reading
+        focus = str(args.get("focus") or "").strip()
+        today = time.strftime("%Y-%m-%d")
+        declared = parse_declared_dependencies(root, meta["files"])
+        declared_block = ""
+        if declared:
+            declared_block = ("## Declared dependencies (parsed exactly from the manifests; copy these versions verbatim)\n"
+                              + "\n".join(f"- {pkg} {spec}  ({rel})" for rel, pkg, spec in declared) + "\n\n")
+        prompt = (f"{corpus}\n\n{declared_block}## Request\nToday is {today}. Check these dependencies with Google "
+                  "Search. In the 'Declared version' column, copy the declared version exactly as listed above."
+                  + (f" Focus: {focus}" if focus else ""))
+        res = call_gemini(_tier(args, "flash"), SYS_DEPS, prompt, thinking_level="medium",
+                          max_output_tokens=16384, tools=[{"googleSearch": {}}])
+        scope = describe_scope(meta) + "; grounded with Google Search (5,000 requests a month free, then $14 per 1,000)"
+        return _clip(res["text"]) + sources_block(res) + usage_footer(res, scope)
+
+    if name == "gemini4_spec_check":
+        spec = str(args.get("spec") or "").strip()
+        if not spec:
+            raise ToolError("`spec` is required: a workspace file or an https URL.")
+        code, meta = collect_files(list(args.get("paths") or []), root)
+        media: List[Dict[str, Any]] = []
+        tools = None
+        spec_text = ""
+        if re.match(r"^https?://", spec, re.I):
+            parsed = urllib.parse.urlparse(spec)
+            if not parsed.hostname:
+                raise ToolError(f"Invalid spec URL: {spec!r}")
+            tools = [{"urlContext": {}}]
+            spec_label = spec
+            spec_text = f"The specification is at this URL; read it with the URL context tool: {spec}"
+        elif Path(spec).suffix.lower() in MEDIA_TYPES:
+            media, names = load_media([spec], root, ("application/pdf", "image/"))
+            spec_label = names[0]
+            spec_text = f"The specification is the attached file `{spec_label}`."
+        else:
+            spec_corpus, _ = collect_files([spec], root)
+            spec_label = spec
+            spec_text = f"## Specification\n{spec_corpus}"
+        focus = str(args.get("focus") or "").strip()
+        prompt = (f"{spec_text}\n\n## Code\n{code}\n\n## Request\nCheck the code against the specification."
+                  + (f" Focus: {focus}" if focus else ""))
+        res = call_gemini(_tier(args, "pro"), SYS_SPEC, prompt, thinking_level="high",
+                          max_output_tokens=32768, media_parts=media, tools=tools)
+        return _clip(res["text"]) + sources_block(res) + usage_footer(res, f"spec `{spec_label}`; {describe_scope(meta)}")
+
+    if name == "gemini4_visual_debug":
+        question = str(args.get("question") or "").strip()
+        if not question:
+            raise ToolError("`question` is required.")
+        media, names = load_media(list(args.get("media") or []), root, ("image/", "video/"))
+        if not media:
+            raise ToolError("`media` is empty. Pass screenshots or a recording inside the workspace.")
+        code, meta = ("", None)
+        if args.get("paths"):
+            code, meta = collect_files(list(args["paths"]), root)
+        prompt = (f"Attached: {', '.join(names)}.\n\n" + (f"## Source code\n{code}\n\n" if code else "")
+                  + f"## Question\n{question}")
+        res = call_gemini(_tier(args, "flash"), SYS_SEE, prompt, thinking_level="medium",
+                          max_output_tokens=16384, media_parts=media)
+        scope = f"media: {', '.join(names)}" + (f"; {describe_scope(meta)}" if meta else "")
         return _clip(res["text"]) + usage_footer(res, scope)
 
     if name == "ask_antigravity":

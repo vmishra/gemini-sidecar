@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.1.0 (2026-11-04)
+
+### Added
+- `/gemini:deps`: checks dependency manifests against live Google Search results (latest versions, CVEs affecting the declared versions, breaking changes) and lists its sources. Common manifest formats are parsed exactly, so declared versions are never misread.
+- `/gemini:spec-check`: checks code against a PDF, Markdown or text spec in the repository, or a URL, requirement by requirement.
+- `/gemini:see`: debugs from screenshots or short screen recordings alongside the source code.
+- `/gemini:map`: writes an `ARCHITECTURE.md` onboarding guide for the repository, staged for review.
+- MCP tools `gemini4_check_dependencies`, `gemini4_spec_check` and `gemini4_visual_debug`, plus an `architecture` mode for `gemini4_long_decode_refactor`.
+
+### Fixed
+- README: the prefix-free example now uses `/analyze`. Bare `/review` runs Claude Code's built-in review.
+
 ## 2.0.0 (2026-11-03)
 
 First release as `gemini-sidecar` (previously `gemini4-harness-kit`).

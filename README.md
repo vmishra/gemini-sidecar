@@ -46,6 +46,10 @@ Run `/gemini:status` to check the setup, then `/gemini:analyze what does this re
 | `/gemini:test-triage` | find out why tests fail without pasting the log | `/gemini:test-triage pytest -x` |
 | `/gemini:docs` | add or fix docstrings without touching behaviour | `/gemini:docs src/utils/` |
 | `/gemini:ask-antigravity` | challenge the current plan before you commit to it | `/gemini:ask-antigravity is a queue overkill here?` |
+| `/gemini:deps` | find outdated and vulnerable dependencies, from live search | `/gemini:deps` |
+| `/gemini:spec-check` | check code against a PDF spec, RFC or API doc | `/gemini:spec-check docs/api-v2.pdf src/api/` |
+| `/gemini:see` | debug from a screenshot or screen recording | `/gemini:see screens/checkout.mov src/ui/ total flickers` |
+| `/gemini:map` | get an ARCHITECTURE.md onboarding guide for any repo | `/gemini:map` |
 | `/gemini:status` | check setup, and see tokens and cost so far | `/gemini:status` |
 
 Options:
@@ -54,7 +58,7 @@ Options:
 - `--staged` reviews only staged changes.
 - `--focus "<area>"` narrows an audit.
 
-When no other plugin uses the same name, the prefix is optional: `/review` works.
+The prefix is optional when nothing else uses the name: `/analyze` works. Keep the prefix for `/gemini:review`, because Claude Code has its own built-in `/review`.
 
 <p align="center">
   <img src="./assets/demo-security-audit.svg" alt="/gemini:security-audit run on this repository finds six real issues with CWE IDs and file:line locations" width="100%" />
@@ -74,6 +78,30 @@ That's `/gemini:security-audit` pointed at this repository's own code. It found 
 </table>
 
 <sub>Screenshots are real Gemini output from runs on this repository and a small test project, trimmed to fit. Claude's closing remarks are condensed.</sub>
+
+## What Gemini adds that your agent can't do alone
+
+Four commands lean on things Gemini does natively.
+
+**Live search.** `/gemini:deps` checks your dependency files against Google Search results, so CVEs and releases from last week show up, not just what a model learned in training. Every answer lists its sources.
+
+<p align="center">
+  <img src="./assets/demo-deps.svg" alt="/gemini:deps finds CVEs in pinned flask and requests versions with sources and an upgrade plan" width="100%" />
+</p>
+
+**Eyes.** `/gemini:see` watches a screenshot or a short screen recording next to your source code and points at the lines behind what's on screen.
+
+<table>
+<tr>
+<td width="44%"><img src="./assets/example-cart.png" alt="Screenshot of a cart page whose total reads $NaN" /></td>
+<td width="56%"><img src="./assets/demo-see.svg" alt="/gemini:see traces the $NaN total to a missing price on web/cart.js:1" /></td>
+</tr>
+<tr><td>What Gemini was shown</td><td>What came back, with the cause in <code>web/cart.js</code></td></tr>
+</table>
+
+**Documents.** `/gemini:spec-check` reads a spec natively: a PDF (tables and diagrams included), Markdown, or a URL such as an RFC. It reads the code alongside, then marks each requirement Met, Partial, Missing or Contradicts, with `path:line` evidence.
+
+**A whole repository at once.** `/gemini:map` reads everything that git tracks, up to Gemini's 1M-token context, and writes an `ARCHITECTURE.md` onboarding guide for you to review.
 
 ## How it works
 
@@ -103,7 +131,7 @@ Your agent sends **paths**, not file contents. A small server on your machine re
 
 <dl>
 <dt>MCP server</dt>
-<dd>The engine. A single Python file that gives your agent seven tools: analyze, security audit, review diff, refactor, triage failures, ask Antigravity, and status. MCP (Model Context Protocol) is the standard way coding agents call external tools, so Claude Code, Codex CLI and Cursor can all use it. Your agent calls it; you don't.</dd>
+<dd>The engine. A single Python file that gives your agent ten tools: analyze, security audit, review diff, refactor (also used for tests, docs and the architecture map), triage failures, check dependencies, spec check, visual debug, ask Antigravity, and status. MCP (Model Context Protocol) is the standard way coding agents call external tools, so Claude Code, Codex CLI and Cursor can all use it. Your agent calls it; you don't.</dd>
 
 <dt>Commands</dt>
 <dd>The <code>/gemini:…</code> slash commands in Claude Code. Each is a short recipe that tells Claude which tool to call, with what, and what to do with the answer: verify findings, and ask before applying changes.</dd>
@@ -127,12 +155,17 @@ Each run was made on 3 November 2026 against Vertex AI. Costs use November 2026 
 | `/gemini:refactor` with tests, small project | `gemini-4-argon` | 384 tok | 2,817 tok | 45 s | $0.029 |
 | `/gemini:review`, one uncommitted change | `gemini-3.8-flash` | 280 tok | 1,984 tok | 16 s | $0.008 |
 | `/gemini:test-triage`, one failing suite | `gemini-3.8-flash` | 415 tok | 332 tok | 3.9 s | $0.002 |
+| `/gemini:deps`, two pinned packages, with Google Search | `gemini-3.8-flash` | 300 tok | 4,027 tok | 42 s | $0.015 + search |
+| `/gemini:spec-check`, PDF spec vs. one module | `gemini-4-argon` | 961 tok | 1,944 tok | 29 s | $0.021 |
+| `/gemini:spec-check`, RFC 6585 by URL | `gemini-3.8-flash` | 358 tok | 6,724 tok | 44 s | $0.026 |
+| `/gemini:see`, one screenshot + 2 source files | `gemini-3.8-flash` | 1,518 tok | 786 tok | 6.4 s | $0.004 |
+| `/gemini:map`, small project | `gemini-4-argon` | 940 tok | 3,257 tok | 52 s | $0.035 |
 
 \*Mostly reasoning. Audits and refactors on `gemini-4-argon` think hard and can take minutes; analysis and triage on Flash take seconds. `/gemini:status` reports the same figures for your own session.
 
 ## Codex CLI and Cursor
 
-Both get the same seven tools through the MCP server and keep their own model:
+Both get the same ten tools through the MCP server and keep their own model:
 
 ```bash
 git clone https://github.com/vmishra/gemini-sidecar.git && cd gemini-sidecar
@@ -161,6 +194,8 @@ Scheduled changes:
 - `gemini-4-argon` moves to $4 / $0.20 / $20 on 1 Dec 2026.
 - `gemini-3.8-flash` moves to $1.50 / $0.15 / $7.50 on 1 Jan 2027.
 
+`/gemini:deps` also uses Google Search grounding: 5,000 grounded requests a month are free on paid plans, then $14 per 1,000 (not available on the free tier). Reading a URL in `/gemini:spec-check` is billed as ordinary input tokens.
+
 Caching is automatic for repeated prefixes of at least 4,096 tokens on Argon (6,144 on Vertex AI) and 1,024 on Flash, but hits aren't guaranteed. The free tier for Flash models may use your data to improve Google's products, so use a paid key or Vertex AI for proprietary code.
 
 Sources: [Gemini API pricing](https://aistudio.google.com/docs/pricing), [Gemini 4 Argon announcement](https://blog.google/innovation-and-ai/models-and-research/gemini-models/gemini-4-argon/), [Claude pricing](https://platform.claude.com/docs/en/about-claude/pricing), [caching minimums](https://firebase.google.com/docs/ai-logic/context-caching).
@@ -172,6 +207,7 @@ File contents go to the Gemini API, or to Vertex AI in your own Google Cloud pro
 - **Only your project.** Paths outside it, `..` and symlinks that escape are rejected. Your home directory or `/` can't be the project.
 - **Only what git would commit.** Folders are expanded with `git ls-files`, so `.gitignore` applies.
 - **Never secrets.** It never reads `.env*`, `*.pem`, `*.key`, SSH keys, `credentials*`, `*.tfstate`, `.npmrc`, `.netrc` or `.git/`. Tokens for Google, AWS, GitHub, Slack, Stripe, OpenAI and Anthropic, plus private keys and JWTs, are redacted. Each answer says what was excluded.
+- **Only the media you name.** `/gemini:see` and `/gemini:spec-check` send just the screenshots, recordings or PDFs you pass, under the same rules. For a spec URL, Google fetches the page; nothing local is sent with it beyond your code paths.
 - **No surprise edits.** Generated code goes only to `.gemini4-staging/<run>/`, which is git-ignored.
 
 Details, including the gateway's protections, are in [SECURITY.md](./SECURITY.md) and the [reference](./docs/reference.md).
@@ -179,7 +215,7 @@ Details, including the gateway's protections, are in [SECURITY.md](./SECURITY.md
 ## More
 
 - [How the gateway works](./docs/gateway.md): run Claude Code's subagents, or the whole session, on Gemini.
-- [Reference](./docs/reference.md): all seven tools, configuration, troubleshooting, development.
+- [Reference](./docs/reference.md): all ten tools, configuration, troubleshooting, development.
 - [Contributing](./CONTRIBUTING.md), [Security policy](./SECURITY.md) and [Changelog](./CHANGELOG.md)
 
 Licensed under [Apache 2.0](./LICENSE).

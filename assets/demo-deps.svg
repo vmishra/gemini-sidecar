@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 483" width="1040" height="483" role="img" aria-label="Claude Code · /gemini:deps">
+<title>Claude Code · /gemini:deps</title>
+<rect x="1" y="1" width="1038" height="481" rx="10" fill="#0D1117" stroke="#30363D"/>
+<rect x="1" y="1" width="1038" height="34" rx="10" fill="#161B22"/><rect x="1" y="25" width="1038" height="10" fill="#161B22"/>
+<circle cx="22" cy="18" r="6" fill="#FF5F56"/><circle cx="42" cy="18" r="6" fill="#FFBD2E"/><circle cx="62" cy="18" r="6" fill="#27C93F"/>
+<text x="520.0" y="22" text-anchor="middle" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif" font-size="12.5" fill="#8B949E">Claude Code · /gemini:deps</text>
+<g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="13" xml:space="preserve">
+<text x="22" y="58"><tspan fill="#85E89D" font-weight="700">❯ </tspan><tspan fill="#FFFFFF" font-weight="700">/gemini:deps</tspan></text>
+<text x="22" y="77"><tspan fill="#E6E8EB"></tspan></text>
+<text x="22" y="96"><tspan fill="#B392F0">⏺ </tspan><tspan fill="#B392F0">gemini4 · gemini4_check_dependencies()</tspan></text>
+<text x="22" y="115"><tspan fill="#8B949E">  ⎿ found requirements.txt · grounded with Google Search · 6 sources</tspan></text>
+<text x="22" y="134"><tspan fill="#E6E8EB"></tspan></text>
+<text x="22" y="153"><tspan fill="#FFFFFF" font-weight="700">  Package   Pinned     Latest   CVEs affecting your version (fixed in)</tspan></text>
+<text x="22" y="172"><tspan fill="#E6E8EB">  flask     1.1.2      3.1.3    </tspan><tspan fill="#F97583">CVE-2023-30861 (2.2.5), CVE-2026-27205 (3.1.3)</tspan></text>
+<text x="22" y="191"><tspan fill="#E6E8EB">  requests  2.25.0     2.34.2   </tspan><tspan fill="#F97583">CVE-2023-32681 (2.31.0), CVE-2024-35195 (2.32.0),</tspan></text>
+<text x="22" y="210"><tspan fill="#E6E8EB">                                </tspan><tspan fill="#F97583">CVE-2024-47081 (2.32.4)</tspan></text>
+<text x="22" y="229"><tspan fill="#E6E8EB"></tspan></text>
+<text x="22" y="248"><tspan fill="#FFFFFF" font-weight="700">Upgrade risk</tspan></text>
+<text x="22" y="267"><tspan fill="#E6E8EB">  requests 2.25.0 → 2.34.2  </tspan><tspan fill="#85E89D">low </tspan><tspan fill="#E6E8EB">  same major version; needs Python 3.8+, newer urllib3</tspan></text>
+<text x="22" y="286"><tspan fill="#E6E8EB">  flask 1.1.2 → 3.1.3       </tspan><tspan fill="#FFDF5D">high</tspan><tspan fill="#E6E8EB">  two majors; Werkzeug 3, removed flask.escape, JSONEncoder</tspan></text>
+<text x="22" y="305"><tspan fill="#E6E8EB"></tspan></text>
+<text x="22" y="324"><tspan fill="#8B949E">  Sources: osv.dev, github.com, snyk.io, pypi.org, gitlab.com, safeguard.sh</tspan></text>
+<text x="22" y="343"><tspan fill="#E6E8EB"></tspan></text>
+<text x="22" y="362"><tspan fill="#E6E8EB">Bump requests first and run the tests; then Flask one major version at a time.</tspan></text>
+<text x="22" y="381"><tspan fill="#E6E8EB">I haven&#x27;t changed anything yet. Start with requests?</tspan></text>
+<text x="22" y="400"><tspan fill="#E6E8EB"></tspan></text>
+<text x="22" y="419"><tspan fill="#8B949E">  ───</tspan></text>
+<text x="22" y="438"><tspan fill="#9ECBFF">  gemini-3.8-flash via vertex-ai | 42s | input 300 tok | output 4,027 tok | ~$0.015 + search</tspan></text>
+</g></svg>

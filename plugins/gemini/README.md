@@ -26,6 +26,10 @@ Credentials: run `/plugin configure gemini@gemini-sidecar` to store a Gemini API
 - `/gemini:test-gen <paths>`
 - `/gemini:test-triage [command]`
 - `/gemini:docs <paths>`
+- `/gemini:deps [manifests] [--focus area]`
+- `/gemini:spec-check <spec.pdf | url> [paths]`
+- `/gemini:see <screenshot | recording> [paths] [what is wrong]`
+- `/gemini:map [paths]`
 - `/gemini:ask-antigravity [question]`
 - `/gemini:status`
 

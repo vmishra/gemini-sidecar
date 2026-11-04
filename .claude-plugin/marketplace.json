@@ -8,7 +8,7 @@
     {
       "name": "gemini",
       "source": "./plugins/gemini",
-      "description": "Slash commands (/gemini:analyze, /gemini:security-audit, /gemini:review, /gemini:refactor, /gemini:test-gen, /gemini:test-triage, /gemini:docs, /gemini:ask-antigravity, /gemini:status) backed by a local Gemini MCP server."
+      "description": "Slash commands (/gemini:analyze, /gemini:security-audit, /gemini:review, /gemini:refactor, /gemini:test-gen, /gemini:test-triage, /gemini:docs, /gemini:deps, /gemini:spec-check, /gemini:see, /gemini:map, /gemini:ask-antigravity, /gemini:status) backed by a local Gemini MCP server."
     }
   ]
 }
