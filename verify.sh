@@ -36,6 +36,7 @@ except ImportError:  # Python < 3.11
 print(f"  ok: {len(files)} JSON{note}")
 PY
 for f in install.sh verify.sh; do bash -n "$f"; done
+sh -n plugins/gemini/hooks/read-guard.sh
 echo "  ok: shell syntax"
 
 step 2/4 "Claude Code plugin manifests"

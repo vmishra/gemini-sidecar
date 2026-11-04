@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Dict, List, Optional, Tuple
 
 SERVER_NAME = "gemini4"
-SERVER_VERSION = "2.1.1"
+SERVER_VERSION = "2.2.0"
 DEFAULT_PROTOCOL_VERSION = "2025-06-18"
 
 _RPC_OUT: BinaryIO = sys.stdout.buffer
@@ -339,6 +339,7 @@ def collect_files(
     total_chars = 0
     redactions = 0
     truncated = False
+    omitted: List[str] = []
 
     for fpath in candidates:
         real = fpath.resolve()
@@ -374,6 +375,8 @@ def collect_files(
             continue
         if len(included) >= MAX_FILES or total_chars + len(text) > max_chars:
             skipped["over_budget"] += 1
+            if len(omitted) < 15:
+                omitted.append(rel)
             truncated = True
             continue
         text, n = redact_secrets(text)
@@ -394,6 +397,7 @@ def collect_files(
         "chars": total_chars,
         "approx_tokens": total_chars // 4,
         "truncated": truncated,
+        "omitted": omitted,
         "redactions": redactions,
         "skipped": skipped,
         "rejected": rejected,
@@ -531,7 +535,11 @@ def describe_scope(meta: Dict[str, Any]) -> str:
     if meta["redactions"]:
         parts.append(f"{meta['redactions']} secret-like strings redacted")
     if meta["truncated"]:
-        parts.append(f"context budget reached, {sk['over_budget']} files left out (narrow `paths`)")
+        names = ", ".join(meta.get("omitted") or [])
+        more = sk["over_budget"] - len(meta.get("omitted") or [])
+        parts.append(f"context budget reached, {sk['over_budget']} files left out"
+                     + (f": {names}" + (f" and {more} more" if more > 0 else "") if names else "")
+                     + " (narrow `paths` or ask about these separately)")
     if sk["too_large"]:
         parts.append(f"{sk['too_large']} files over {MAX_FILE_BYTES:,} bytes skipped")
     if meta["rejected"]:
@@ -968,8 +976,21 @@ def stage_generated_files(text: str, root: Path, truncated: bool) -> Tuple[Path,
     return stage_root, written, refused, notes
 
 
-def read_log_tail(log_rel: str, root: Path, budget: int) -> str:
-    """Last `budget` chars of a log inside the workspace (failures are usually at the end)."""
+LOG_EVIDENCE_RE = re.compile(
+    r"(FAIL|ERROR|Error|Exception|Traceback|panic:|fatal|Assertion|assert|not ok|[✗✕×]|"
+    r"^\s*E\s{2,}|\bat \S+\(?\S*:\d+|\S+\.(?:py|js|ts|tsx|jsx|go|rs|java|kt|rb|cs|cpp|c|h|php|swift):\d+)"
+)
+MAX_LOG_BYTES = 50_000_000
+
+
+def read_log_digest(log_rel: str, root: Path, budget: int) -> Tuple[str, str]:
+    """A bounded view of a test or build log that keeps the evidence.
+
+    Small logs are sent whole. For large logs, every line that looks like a failure, error,
+    traceback or file:line location is kept (with two lines of context), plus the tail, and
+    each dropped range is marked in place. Deterministic: no model is involved.
+    Returns (corpus, description of what was kept).
+    """
     rel_path = Path(log_rel)
     if not log_rel or rel_path.is_absolute() or ".." in rel_path.parts:
         raise ToolError("`log_path` must be a workspace-relative file path.")
@@ -978,12 +999,47 @@ def read_log_tail(log_rel: str, root: Path, budget: int) -> str:
         raise ToolError(f"Log file `{log_rel}` not found inside the workspace (or not allowed).")
     size = path.stat().st_size
     with path.open("rb") as fh:
-        if size > budget:
-            fh.seek(size - budget)
+        if size > MAX_LOG_BYTES:
+            fh.seek(size - MAX_LOG_BYTES)
         text = fh.read().decode("utf-8", errors="replace")
     text, _ = redact_secrets(text)
-    prefix = "[... log head omitted ...]\n" if size > budget else ""
-    return f"<file path={json.dumps(log_rel)}>\n{prefix}{text}\n</file>"
+    lines = text.splitlines()
+    n = len(lines)
+    head_note = f" (first {size - MAX_LOG_BYTES:,} bytes skipped)" if size > MAX_LOG_BYTES else ""
+    if len(text) <= budget:
+        body = "\n".join(f"{i:>6}| {line}" for i, line in enumerate(lines, 1))
+        return f"<file path={json.dumps(log_rel)}>\n{body}\n</file>", f"log `{log_rel}`: all {n:,} lines{head_note}"
+    keep = set()
+    for i, line in enumerate(lines):
+        if LOG_EVIDENCE_RE.search(line):
+            keep.update(range(max(0, i - 2), min(n, i + 3)))
+    tail_budget = budget // 3
+    used, j = 0, n - 1
+    while j >= 0 and used + len(lines[j]) + 1 <= tail_budget:
+        keep.add(j)
+        used += len(lines[j]) + 1
+        j -= 1
+    # Trim evidence lines from the top if they alone exceed the budget (most recent evidence wins).
+    ordered = sorted(keep)
+    total = sum(len(lines[i]) + 9 for i in ordered)
+    while ordered and total > budget:
+        total -= len(lines[ordered[0]]) + 9
+        ordered.pop(0)
+    out: List[str] = []
+    dropped_ranges = 0
+    prev = -1
+    for i in ordered:
+        if i != prev + 1:
+            out.append(f"[... lines {prev + 2}-{i} omitted ...]")
+            dropped_ranges += 1
+        out.append(f"{i + 1:>6}| {lines[i]}")
+        prev = i
+    if prev < n - 1:
+        out.append(f"[... lines {prev + 2}-{n} omitted ...]")
+        dropped_ranges += 1
+    desc = (f"log `{log_rel}`: kept {len(ordered):,} of {n:,} lines (failure evidence and the tail), "
+            f"{dropped_ranges} ranges omitted{head_note}")
+    return f"<file path={json.dumps(log_rel)}>\n" + "\n".join(out) + "\n</file>", desc
 
 
 def file_change_summary(root: Path, stage_root: Path, rel: str) -> str:
@@ -1095,18 +1151,18 @@ def run_agy_plan(prompt: str, files: List[str], root: Path, model: str, effort: 
 _PATHS = {
     "type": "array",
     "items": {"type": "string"},
-    "description": "Workspace-relative files, directories, or globs (for example [\"src/\", \"api/*.py\"]). "
-                   "Pass paths, never file contents.",
+    "description": "Workspace-relative files, dirs or globs, e.g. [\"src/\"]. Never file contents.",
 }
-_ROOT = {"type": "string", "description": "Optional sub-directory of the workspace to treat as root."}
+_ROOT = {"type": "string", "description": "Optional sub-directory to treat as root."}
+_ESTIMATE = {"type": "boolean", "default": False,
+             "description": "Return files, tokens, estimated cost and time without calling Gemini."}
 
 TOOLS: List[Dict[str, Any]] = [
     {
         "name": "gemini4_analyze_codebase",
         "description": (
-            "Answer a question about a large set of files (architecture, call paths, where something is "
-            "implemented, root cause of a bug) by reading them from disk into Gemini's 1M-token context. "
-            "Only the answer comes back, so the files never enter your own context."
+            "Answer a question over many files (architecture, call paths, root causes). Gemini reads them "
+            "from disk into a 1M-token context; only the answer returns."
         ),
         "annotations": {"readOnlyHint": True, "openWorldHint": True},
         "inputSchema": {
@@ -1116,11 +1172,10 @@ TOOLS: List[Dict[str, Any]] = [
                 "paths": _PATHS,
                 "model_tier": {
                     "type": "string", "enum": ["flash", "pro", "flash-lite"], "default": "flash",
-                    "description": f"flash = {MODEL_FLASH} (default); pro = {MODEL_PRO} for deep cross-module "
-                                   f"reasoning; flash-lite = {MODEL_LITE} for cheap scans.",
+                    "description": f"flash={MODEL_FLASH} (default), pro={MODEL_PRO} (deep), flash-lite={MODEL_LITE}.",
                 },
-                "include_globs": {"type": "array", "items": {"type": "string"},
-                                  "description": "Optional filename filters such as [\"*.py\", \"*.ts\"]."},
+                "include_globs": {"type": "array", "items": {"type": "string"}, "description": "e.g. [\"*.py\"]"},
+                "estimate_only": _ESTIMATE,
                 "workspace_root": _ROOT,
             },
             "required": ["question", "paths"],
@@ -1129,16 +1184,16 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "gemini4_security_audit",
         "description": (
-            f"Security review of files or directories on {MODEL_SECURITY}: injection, authn/authz flaws, SSRF, "
-            "path traversal, unsafe deserialization, secrets handling, race conditions. Returns a findings table "
-            "with CWE IDs and path:line evidence."
+            f"Security review on {MODEL_SECURITY}: injection, auth flaws, SSRF, path traversal, deserialization, "
+            "secrets, races. Findings table with CWE and path:line. Can take minutes."
         ),
         "annotations": {"readOnlyHint": True, "openWorldHint": True},
         "inputSchema": {
             "type": "object",
             "properties": {
                 "paths": _PATHS,
-                "focus": {"type": "string", "description": "Optional focus, e.g. 'auth middleware and session handling'."},
+                "focus": {"type": "string"},
+                "estimate_only": _ESTIMATE,
                 "workspace_root": _ROOT,
             },
             "required": ["paths"],
@@ -1147,8 +1202,8 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "gemini4_review_diff",
         "description": (
-            "Review the current git changes (working tree against a base ref) before committing. The server runs "
-            "git itself, so the diff never enters your context. Returns issues with path:line and a ship verdict."
+            "Review git changes against a base ref before committing; the server runs git itself. "
+            "Returns issues with path:line and a ship verdict."
         ),
         "annotations": {"readOnlyHint": True, "openWorldHint": True},
         "inputSchema": {
@@ -1168,9 +1223,8 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "gemini4_long_decode_refactor",
         "description": (
-            f"Generate large multi-file changes on {MODEL_PRO} (up to 65,536 output tokens): refactors, migrations, "
-            "test suites, or documentation. Complete files are written to .gemini4-staging/<run>/ for review; the "
-            "working tree is not modified. Returns the list of staged files and how to diff them."
+            f"Generate large multi-file changes on {MODEL_PRO} (up to 65K output tokens): refactors, tests, docs, "
+            "or an ARCHITECTURE.md. Files are staged in .gemini4-staging/<run>/; the working tree is untouched."
         ),
         "annotations": {"readOnlyHint": False, "destructiveHint": False, "openWorldHint": True},
         "inputSchema": {
@@ -1181,6 +1235,7 @@ TOOLS: List[Dict[str, Any]] = [
                 "mode": {"type": "string", "enum": ["refactor", "tests", "docs", "architecture"], "default": "refactor",
                          "description": "architecture writes an ARCHITECTURE.md onboarding guide for the given paths."},
                 "model_tier": {"type": "string", "enum": ["pro", "flash"], "default": "pro"},
+                "estimate_only": _ESTIMATE,
                 "workspace_root": _ROOT,
             },
             "required": ["spec", "paths"],
@@ -1189,9 +1244,8 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "gemini4_triage_failures",
         "description": (
-            "Root-cause failing tests or builds from a log file plus the relevant source files. Write the test "
-            "output to a file first (for example .gemini4-staging/test-output.log) and pass its path, so the log "
-            "never enters your context."
+            "Root-cause failing tests or builds from a saved log plus source files. Write output to a file "
+            "(e.g. .gemini4-staging/test-output.log) and pass its path."
         ),
         "annotations": {"readOnlyHint": True, "openWorldHint": True},
         "inputSchema": {
@@ -1208,9 +1262,8 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "ask_antigravity",
         "description": (
-            "Second opinion from a different model family on a plan, design, or change. Uses the Antigravity CLI "
-            "in read-only plan mode when GEMINI4_ENABLE_AGY_CLI=1 and `agy` is installed; otherwise calls "
-            f"{MODEL_PRO} directly with the given paths."
+            f"Independent second opinion on a plan or change from {MODEL_PRO}, via the Antigravity CLI in "
+            "read-only plan mode when enabled."
         ),
         "annotations": {"readOnlyHint": True, "openWorldHint": True},
         "inputSchema": {
@@ -1227,10 +1280,8 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "gemini4_check_dependencies",
         "description": (
-            "Check dependency manifests (requirements.txt, pyproject.toml, package.json, go.mod, Cargo.toml, pom.xml, "
-            "...) against live Google Search results: latest versions, known vulnerabilities affecting the declared "
-            "versions, and breaking changes. Returns a table with source links. Finds the manifests itself when "
-            "`paths` is omitted."
+            "Check dependency manifests against live Google Search: latest versions, CVEs affecting declared "
+            "versions, breaking changes, with sources. Finds manifests itself if `paths` is omitted."
         ),
         "annotations": {"readOnlyHint": True, "openWorldHint": True},
         "inputSchema": {
@@ -1246,9 +1297,8 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "gemini4_spec_check",
         "description": (
-            "Check code against a specification: a PDF, Markdown or text file in the workspace, or an http(s) URL. "
-            "Gemini reads the spec natively (PDFs included) next to the code and returns a requirement-by-requirement "
-            "table: Met, Partial, Missing or Contradicts, with path:line evidence."
+            "Check code against a spec (PDF/Markdown/text file or https URL), requirement by requirement: "
+            "Met, Partial, Missing or Contradicts, with path:line."
         ),
         "annotations": {"readOnlyHint": True, "openWorldHint": True},
         "inputSchema": {
@@ -1256,8 +1306,9 @@ TOOLS: List[Dict[str, Any]] = [
             "properties": {
                 "spec": {"type": "string", "description": "Workspace-relative spec file (.pdf, .md, .txt, ...) or an https URL."},
                 "paths": {**_PATHS, "description": "Source files or directories that implement the spec."},
-                "focus": {"type": "string", "description": "Optional, e.g. 'error handling sections only'."},
+                "focus": {"type": "string"},
                 "model_tier": {"type": "string", "enum": ["pro", "flash"], "default": "pro"},
+                "estimate_only": _ESTIMATE,
                 "workspace_root": _ROOT,
             },
             "required": ["spec", "paths"],
@@ -1266,9 +1317,8 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "gemini4_visual_debug",
         "description": (
-            "Debug from screenshots or a short screen recording: Gemini watches the images or video next to the "
-            "source code and points to the components and lines responsible for what is on screen. Accepts .png, "
-            ".jpg, .webp, .mp4, .mov and .webm files inside the workspace (up to about 14 MB in total)."
+            "Debug from screenshots or a screen recording (.png/.jpg/.webp/.mp4/.mov/.webm, ~14 MB max) "
+            "next to source code; points to the lines responsible."
         ),
         "annotations": {"readOnlyHint": True, "openWorldHint": True},
         "inputSchema": {
@@ -1287,13 +1337,48 @@ TOOLS: List[Dict[str, Any]] = [
     {
         "name": "gemini4_status",
         "description": (
-            "Show configuration (models, backend, workspace root, Antigravity CLI availability) and token usage "
-            "and estimated cost for calls made in this session. Makes no API calls."
+            "Configuration, token usage and estimated cost for this session. No API calls."
         ),
         "annotations": {"readOnlyHint": True, "openWorldHint": False},
         "inputSchema": {"type": "object", "properties": {}},
     },
 ]
+
+
+def _clamp(value: float, low: int, high: int) -> int:
+    return int(min(high, max(low, value)))
+
+
+# Typical output tokens (including reasoning) as a function of input tokens, and wall time, fitted to
+# measured runs (e.g. analyze: 103K in -> 2K out; audit: 58K in -> 32K out, 1.3K in -> 1.4K out).
+ESTIMATE_PROFILE = {
+    "gemini4_analyze_codebase": (lambda t: _clamp(t * 0.02, 300, 4_000), "5-30 s"),
+    "gemini4_security_audit": (lambda t: _clamp(t * 0.6, 1_500, 32_000), "30 s-7 min"),
+    "gemini4_long_decode_refactor": (lambda t: _clamp(t * 1.3, 3_000, 65_536), "30 s-5 min"),
+    "gemini4_spec_check": (lambda t: _clamp(t * 2, 2_000, 8_000), "30-90 s"),
+}
+
+
+def estimate_reply(tool: str, model: str, meta: Dict[str, Any], extra_input_tokens: int = 0) -> str:
+    """Cost preview without calling Gemini: what would be sent, and roughly what it would cost."""
+    tokens_in = meta["approx_tokens"] + extra_input_tokens + 400
+    out_fn, duration = ESTIMATE_PROFILE[tool]
+    out_tokens = out_fn(tokens_in)
+    price = _prices().get(model)
+    cost = None
+    if price:
+        cost = (tokens_in * price[0] + out_tokens * price[2]) / 1_000_000
+    lines = [
+        f"Estimate only; Gemini was not called.",
+        "",
+        f"- Model: `{model}`",
+        f"- Would send: {describe_scope(meta)}",
+        f"- Input: ~{tokens_in:,} tokens; typical output: ~{out_tokens:,} tokens",
+        f"- Estimated cost: {'n/a' if cost is None else f'~${cost:.3f}'} at list price; typical time: {duration}",
+        "",
+        "Run again without `estimate_only` to proceed, or narrow `paths` to reduce cost.",
+    ]
+    return "\n".join(lines)
 
 
 def _tier(args: Dict[str, Any], default: str) -> str:
@@ -1370,6 +1455,8 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
             raise ToolError("`question` is required.")
         model = _tier(args, "flash")
         corpus, meta = collect_files(list(args.get("paths") or []), root, args.get("include_globs"))
+        if args.get("estimate_only"):
+            return estimate_reply(name, model, meta)
         res = call_gemini(
             model, SYS_ANALYZE, f"{corpus}\n\n## Question\n{question}",
             thinking_level="low" if model != MODEL_PRO else "medium", max_output_tokens=16384,
@@ -1379,6 +1466,8 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
     if name == "gemini4_security_audit":
         focus = str(args.get("focus") or "").strip()
         corpus, meta = collect_files(list(args.get("paths") or []), root)
+        if args.get("estimate_only"):
+            return estimate_reply(name, MODEL_SECURITY, meta)
         prompt = f"{corpus}\n\n## Audit request\nAudit the files above." + (f" Focus: {focus}" if focus else "")
         res = call_gemini(MODEL_SECURITY, SYS_SECURITY, prompt, thinking_level="high", max_output_tokens=32768)
         return _clip(res["text"]) + usage_footer(res, describe_scope(meta))
@@ -1440,6 +1529,8 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
         if mode not in GENERATE_MODES:
             raise ToolError(f"Unknown mode {mode!r}. Use one of {sorted(GENERATE_MODES)}.")
         corpus, meta = collect_files(list(args.get("paths") or []), root, numbered=False)
+        if args.get("estimate_only"):
+            return estimate_reply(name, _tier(args, "pro"), meta)
         prompt = f"{corpus}\n\n## Task\n{GENERATE_MODES[mode]}\n\n{spec}"
         res = call_gemini(_tier(args, "pro"), SYS_GENERATE, prompt, thinking_level="high", max_output_tokens=65536)
         truncated = res["finish_reason"] == "MAX_TOKENS"
@@ -1466,7 +1557,7 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
 
     if name == "gemini4_triage_failures":
         log_rel = str(args.get("log_path") or "").strip()
-        log_corpus = read_log_tail(log_rel, root, MAX_CONTEXT_CHARS // 3)
+        log_corpus, log_desc = read_log_digest(log_rel, root, MAX_CONTEXT_CHARS // 3)
         src_corpus, src_meta = "", None
         if args.get("paths"):
             src_corpus, src_meta = collect_files(list(args["paths"]), root, max_chars=MAX_CONTEXT_CHARS - len(log_corpus))
@@ -1477,7 +1568,7 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
             + "## Request\nTriage these failures." + (f" {question}" if question else "")
         )
         res = call_gemini(MODEL_FLASH, SYS_TRIAGE, prompt, thinking_level="medium", max_output_tokens=16384)
-        scope = f"log `{log_rel}`" + (f"; {describe_scope(src_meta)}" if src_meta else "")
+        scope = log_desc + (f"; {describe_scope(src_meta)}" if src_meta else "")
         return _clip(res["text"]) + usage_footer(res, scope)
 
     if name == "gemini4_check_dependencies":
@@ -1506,6 +1597,14 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
         if not spec:
             raise ToolError("`spec` is required: a workspace file or an https URL.")
         code, meta = collect_files(list(args.get("paths") or []), root)
+        if args.get("estimate_only"):
+            spec_tokens = 0
+            spec_file = root / spec
+            if not re.match(r"^https?://", spec, re.I) and spec_file.is_file() and _is_within(spec_file.resolve(), root):
+                spec_tokens = spec_file.stat().st_size // 4
+            return estimate_reply(name, _tier(args, "pro"), meta, spec_tokens) + (
+                "\nThe spec is fetched by Google and billed as input tokens; its size is not included."
+                if re.match(r"^https?://", spec, re.I) else "")
         media: List[Dict[str, Any]] = []
         tools = None
         spec_text = ""

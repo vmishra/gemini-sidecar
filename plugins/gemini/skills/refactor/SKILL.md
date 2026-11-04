@@ -11,7 +11,7 @@ allowed-tools: Glob Grep Read mcp__plugin_gemini_gemini4__gemini4_long_decode_re
 Request: $ARGUMENTS
 
 1. Work out the files involved. Use paths from the request. If there are none, find them with Grep or Glob, using names and symbols only. Do not read file bodies; Gemini reads them.
-2. Write a precise `spec`: the change, constraints (public API, style, compatibility), and how to verify it.
-3. Call `gemini4_long_decode_refactor` with `spec`, `paths`, and `mode: "refactor"`.
+2. Add one existing file that already follows the project's conventions for this kind of code to `paths` as a style reference, if one exists. Generated code matches conventions much better with an example. Write a precise `spec`: the change, constraints (public API, style, compatibility), how to verify it, and which file is only a reference and must not be changed.
+3. For large changes (dozens of files), call first with `estimate_only: true` and share the expected cost and time. Then call `gemini4_long_decode_refactor` with `spec`, `paths`, and `mode: "refactor"`.
 4. Show the staged file list with the line counts the tool reports, plus a one-line summary of each change. Read a staged file only if you need to check it against the spec. Show full diffs only when asked.
 5. Ask the user before applying. On approval, copy the staged files over the originals, run the project's tests or linter, and report the result. Delete the staging run folder after it has been applied.

@@ -12,6 +12,6 @@ Request: $ARGUMENTS
 
 1. Paths: use any paths in the request. Otherwise use `"."` (the whole repository; .gitignore and secret files are skipped automatically).
 2. Build a `spec` from the request: who the guide is for and anything to emphasize. If the request says nothing, use "Onboarding guide for a new engineer".
-3. Call `gemini4_long_decode_refactor` with `mode: "architecture"`, `paths` and `spec`.
+3. For a large repository, call first with `estimate_only: true` and share the expected cost and time. Then call `gemini4_long_decode_refactor` with `mode: "architecture"`, `paths` and `spec`.
 4. Read the staged `ARCHITECTURE.md` and show its outline (the headings), plus anything that looks wrong to you.
 5. Ask before copying it to the repository root. If an `ARCHITECTURE.md` already exists, show what would change first.

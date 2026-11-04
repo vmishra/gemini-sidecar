@@ -29,12 +29,30 @@
 | `GEMINI4_REQUEST_TIMEOUT` | Seconds per Gemini call (default 900) |
 | `GEMINI4_MAX_MEDIA_BYTES` | Total size of images, video and PDFs per call (default 14 MB; inline requests are limited to about 20 MB after encoding) |
 | `GEMINI4_ENABLE_AGY_CLI=1` | Let `/gemini:ask-antigravity` use the Antigravity CLI |
+| `GEMINI_SIDECAR_READ_GUARD` | `off` (default), `suggest` or `block`: see [Large-read guard](#large-read-guard) |
+| `GEMINI_SIDECAR_READ_GUARD_LINES` | Line threshold for the guard (default 400) |
 | `GEMINI4_PRICES_JSON` | Price overrides, e.g. `{"gemini-4-argon": [4.0, 0.2, 20.0]}` |
 | `GEMINI4_GATEWAY_PORT`, `GEMINI4_GATEWAY_TOKEN` | Gateway port (3456) and token (default: generated file) |
 | `ANTHROPIC_UPSTREAM_KEY` | Gateway, Hybrid: Anthropic key for forwarded requests |
 | `GEMINI4_UNMAPPED_MODEL` | Gateway: Gemini model for other model names when no Anthropic key is set (default `gemini-3.8-flash`) |
 | `GEMINI4_SESSION_BUDGET_USD`, `GEMINI4_GLOBAL_BUDGET_USD` | Gateway: estimated spend caps |
 
+
+## Cost preview
+
+`gemini4_analyze_codebase`, `gemini4_security_audit`, `gemini4_long_decode_refactor` and `gemini4_spec_check` accept `estimate_only: true`. The server collects the files exactly as it would for a real call, then returns the file count, input tokens, typical output tokens, estimated cost and typical time, without calling Gemini. The estimates are fitted to measured runs and landed within about 10% of the actual cost on them. `/gemini:security-audit`, `/gemini:refactor` and `/gemini:map` preview automatically for large scopes.
+
+## Large-read guard
+
+An optional Claude Code hook for whole-file reads of large files:
+
+| `GEMINI_SIDECAR_READ_GUARD` | Behaviour |
+|---|---|
+| `off` (default) | Nothing happens; the hook exits immediately. |
+| `suggest` | The read goes ahead, and Claude gets a note pointing to `gemini4_analyze_codebase`. |
+| `block` | The read is refused with that note; Claude reads the section it needs, or asks Gemini. |
+
+Reads with `offset` or `limit` always pass, because edits need exact lines. Images, PDFs, notebooks and staged output also pass, and any error in the hook lets the read proceed. In testing, current Claude models already read large files selectively, so treat the guard as a safety net for long sessions rather than a large saving.
 
 ## Troubleshooting
 

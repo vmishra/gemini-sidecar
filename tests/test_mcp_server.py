@@ -181,9 +181,10 @@ class ReviewRegressionTests(Workspace):
 
     def test_large_log_keeps_tail(self):
         (self.root / "big.log").write_text("noise\n" * 300_000 + "FAILED test_tail\n")
-        tail = srv.read_log_tail("big.log", self.root, 10_000)
+        tail, desc = srv.read_log_digest("big.log", self.root, 10_000)
         self.assertIn("FAILED test_tail", tail)
-        self.assertIn("log head omitted", tail)
+        self.assertIn("omitted", tail)
+        self.assertIn("kept", desc)
 
     def test_home_or_filesystem_root_refused_as_workspace(self):
         for bad in (str(Path.home()), "/"):
@@ -460,6 +461,48 @@ class GeminiStrengthToolTests(Workspace):
         self.assertFalse(res["isError"])
         self.assertIn("ARCHITECTURE.md", res["content"][0]["text"])
         self.assertIn("Write ARCHITECTURE.md", body["contents"][0]["parts"][-1]["text"])
+
+
+class ContextEfficiencyTests(Workspace):
+    def test_estimate_only_makes_no_api_call(self):
+        with mock.patch.object(srv.urllib.request, "urlopen") as op:
+            for name, args in (("gemini4_analyze_codebase", {"question": "q", "paths": ["src/"]}),
+                               ("gemini4_security_audit", {"paths": ["src/"]}),
+                               ("gemini4_long_decode_refactor", {"spec": "s", "paths": ["src/"]}),
+                               ("gemini4_spec_check", {"spec": "https://example.com/spec", "paths": ["src/"]})):
+                text = srv.execute_tool(name, {**args, "estimate_only": True})
+                self.assertIn("Gemini was not called", text)
+                self.assertIn("Estimated cost", text)
+        op.assert_not_called()
+
+    def test_log_digest_keeps_evidence_from_middle_of_log(self):
+        lines = [f"ok line {i}" for i in range(20_000)]
+        lines[14_238] = "FAILED tests/test_pay.py::test_refund - AssertionError: 0 != 45"
+        (self.root / "huge.log").write_text("\n".join(lines) + "\n")
+        corpus, desc = srv.read_log_digest("huge.log", self.root, 20_000)
+        self.assertIn("test_refund - AssertionError", corpus)
+        self.assertIn("ok line 19999", corpus)
+        self.assertIn("lines 1-", corpus)  # dropped ranges are declared in place
+        self.assertLess(len(corpus), 25_000)
+        self.assertIn("kept", desc)
+
+    def test_small_log_is_sent_whole(self):
+        (self.root / "small.log").write_text("a\nb\nFAILED x\n")
+        corpus, desc = srv.read_log_digest("small.log", self.root, 20_000)
+        self.assertIn("all 3 lines", desc)
+
+    def test_omitted_files_are_named(self):
+        for i in range(5):
+            (self.root / "src" / f"m{i}.py").write_text("x = 1\n" * 200)
+        _, meta = srv.collect_files(["src/"], self.root, max_chars=2_500)
+        self.assertTrue(meta["truncated"])
+        self.assertTrue(meta["omitted"])
+        self.assertIn(meta["omitted"][0], srv.describe_scope(meta))
+
+    def test_tool_schema_footprint_budget(self):
+        # Tool schemas are loaded into the agent's context by some hosts on every turn.
+        size = len(json.dumps(srv.TOOLS))
+        self.assertLess(size, 8_500, f"tool schemas grew to {size} bytes; trim descriptions")
 
 
 class ProtocolTests(unittest.TestCase):

@@ -121,6 +121,15 @@ Your agent sends **paths**, not file contents. A small server on your machine re
 
 **…paste code into a chat window?** The sidecar does the filtering for you. It sends only files inside your project, skips anything in `.gitignore`, never reads `.env` or key files, and redacts tokens it finds.
 
+## When not to use it
+
+Gemini is a second pair of hands, not a replacement for your agent's own judgement. Skip it when:
+
+- **The file is small.** For one or two files of a few hundred lines, your agent reading them directly is faster than a 5 to 30 second round trip.
+- **You're about to edit.** Edits need exact lines, so your agent should read the section it changes itself. The commands answer questions and stage changes; they don't edit in place.
+- **The bug is subtle.** Concurrency issues, tricky state and security-critical logic deserve your strongest model's full attention. Use `/gemini:analyze` to find where to look, then reason about it in the main conversation.
+- **You need an answer in seconds.** Pro-model audits and refactors take minutes. Add `estimate_only` (the commands do this automatically for big scopes) to see the expected time and cost first.
+
 ## Which parts do I need?
 
 <p align="center">
@@ -215,6 +224,7 @@ Details, including the gateway's protections, are in [SECURITY.md](./SECURITY.md
 ## More
 
 - [How the gateway works](./docs/gateway.md): run Claude Code's subagents, or the whole session, on Gemini.
+- Optional large-read guard: set `GEMINI_SIDECAR_READ_GUARD=suggest` (or `block`) and Claude Code is pointed to `/gemini:analyze` when it tries to read a whole file over 400 lines. Partial reads for edits always pass. Details in the [reference](./docs/reference.md#large-read-guard).
 - [Reference](./docs/reference.md): all ten tools, configuration, troubleshooting, development.
 - [Contributing](./CONTRIBUTING.md), [Security policy](./SECURITY.md) and [Changelog](./CHANGELOG.md)
 
