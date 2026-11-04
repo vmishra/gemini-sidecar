@@ -206,7 +206,7 @@ File contents go to the Gemini API, or to Vertex AI in your own Google Cloud pro
 
 - **Only your project.** Paths outside it, `..` and symlinks that escape are rejected. Your home directory or `/` can't be the project.
 - **Only what git would commit.** Folders are expanded with `git ls-files`, so `.gitignore` applies.
-- **Never secrets.** It never reads `.env*`, `*.pem`, `*.key`, SSH keys, `credentials*`, `*.tfstate`, `.npmrc`, `.netrc` or `.git/`. Tokens for Google, AWS, GitHub, Slack, Stripe, OpenAI and Anthropic, plus private keys and JWTs, are redacted. Each answer says what was excluded.
+- **Never secrets.** It never reads `.env*`, `*.pem`, `*.key`, SSH keys, `credentials*`, `*.tfstate`, `.npmrc`, `.netrc` or `.git/`. Tokens for Google, AWS, GitHub, Slack, Stripe, OpenAI and Anthropic, private keys, JWTs and passwords inside URLs are redacted. Each answer says what was excluded.
 - **Only the media you name.** `/gemini:see` and `/gemini:spec-check` send just the screenshots, recordings or PDFs you pass, under the same rules. For a spec URL, Google fetches the page; nothing local is sent with it beyond your code paths.
 - **No surprise edits.** Generated code goes only to `.gemini4-staging/<run>/`, which is git-ignored.
 

@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Dict, List, Optional, Tuple
 
 SERVER_NAME = "gemini4"
-SERVER_VERSION = "2.1.0"
+SERVER_VERSION = "2.1.1"
 DEFAULT_PROTOCOL_VERSION = "2025-06-18"
 
 _RPC_OUT: BinaryIO = sys.stdout.buffer
@@ -162,6 +162,8 @@ SECRET_CONTENT_PATTERNS: List[Tuple[str, "re.Pattern[str]"]] = [
     ("slack-token", re.compile(r"\bxox[abposr]-[0-9A-Za-z\-]{10,}")),
     ("stripe-key", re.compile(r"\b[rs]k_live_[0-9A-Za-z]{20,}")),
     ("jwt", re.compile(r"\beyJ[0-9A-Za-z_\-]{10,}\.eyJ[0-9A-Za-z_\-]{10,}\.[0-9A-Za-z_\-]{10,}")),
+    # user:password@ inside URLs (git remotes, registry URLs, connection strings)
+    ("url-credentials", re.compile(r"(?<=://)[^/\s:@'\"]{1,256}:[^/\s@'\"]{1,256}(?=@)")),
 ]
 
 
@@ -466,6 +468,14 @@ def find_manifests(root: Path, limit: int = 40) -> List[str]:
 _REQ_LINE = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[^\]]*\])?\s*((?:==|>=|<=|~=|!=|>|<|===)\s*[^;#\s]+(?:\s*,\s*(?:==|>=|<=|~=|!=|>|<)\s*[^;#\s,]+)*)?")
 
 
+_URL_SPEC = re.compile(r"(?i)^(?:git\+|https?:|ssh:|file:|git:|github:|gitlab:|bitbucket:|link:|workspace:)|://|@[^/]+:")
+
+
+def _safe_spec(spec: str) -> str:
+    """Never forward URL-style versions: they can embed credentials (git+https://user:token@...)."""
+    return "<url or path>" if _URL_SPEC.search(spec) else redact_secrets(spec)[0]
+
+
 def parse_declared_dependencies(root: Path, manifests: List[str]) -> List[Tuple[str, str, str]]:
     """(manifest, package, declared spec) for formats that are easy to parse exactly.
 
@@ -487,7 +497,7 @@ def parse_declared_dependencies(root: Path, manifests: List[str]) -> List[Tuple[
                     continue
                 m = _REQ_LINE.match(line)
                 if m:
-                    out.append((rel, m.group(1), (m.group(2) or "any").replace(" ", "")))
+                    out.append((rel, m.group(1), _safe_spec((m.group(2) or "any").replace(" ", ""))))
         elif name == "package.json":
             try:
                 data = json.loads(text)
@@ -495,7 +505,8 @@ def parse_declared_dependencies(root: Path, manifests: List[str]) -> List[Tuple[
                 continue
             for section in ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies"):
                 for pkg, ver in (data.get(section) or {}).items():
-                    out.append((rel, pkg, str(ver) + ("" if section == "dependencies" else f" ({section})")))
+                    out.append((rel, redact_secrets(str(pkg))[0],
+                                _safe_spec(str(ver)) + ("" if section == "dependencies" else f" ({section})")))
         elif name == "pyproject.toml":
             in_deps = False
             for line in text.splitlines():
@@ -506,7 +517,7 @@ def parse_declared_dependencies(root: Path, manifests: List[str]) -> List[Tuple[
                     for item in re.findall(r'"([^"]+)"', stripped):
                         m = _REQ_LINE.match(item)
                         if m:
-                            out.append((rel, m.group(1), (m.group(2) or "any").replace(" ", "")))
+                            out.append((rel, m.group(1), _safe_spec((m.group(2) or "any").replace(" ", ""))))
                     if "]" in stripped:
                         in_deps = False
     return out
@@ -1481,6 +1492,7 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
         if declared:
             declared_block = ("## Declared dependencies (parsed exactly from the manifests; copy these versions verbatim)\n"
                               + "\n".join(f"- {pkg} {spec}  ({rel})" for rel, pkg, spec in declared) + "\n\n")
+            declared_block = redact_secrets(declared_block)[0]
         prompt = (f"{corpus}\n\n{declared_block}## Request\nToday is {today}. Check these dependencies with Google "
                   "Search. In the 'Declared version' column, copy the declared version exactly as listed above."
                   + (f" Focus: {focus}" if focus else ""))

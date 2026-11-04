@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.1.1 (2026-11-04)
+
+### Security
+- Redact passwords embedded in URLs (`https://user:password@host`, database connection strings) in everything sent to Gemini.
+- `/gemini:deps` never forwards URL-style dependency versions, which can carry credentials. They appear as `<url or path>`.
+
 ## 2.1.0 (2026-11-04)
 
 ### Added

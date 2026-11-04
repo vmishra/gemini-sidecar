@@ -244,6 +244,13 @@ class SelfAuditRegressionTests(Workspace):
         self.assertIn("return 0", sent)
         self.assertNotIn("sibling", sent)
 
+    def test_url_credentials_are_redacted(self):
+        text, n = srv.redact_secrets("db = 'postgres://admin:s3cr3t@db.internal:5432/app'\nurl = https://example.com/path")
+        self.assertNotIn("s3cr3t", text)
+        self.assertIn("postgres://[REDACTED:url-credentials]@db.internal:5432/app", text)
+        self.assertIn("https://example.com/path", text)
+        self.assertEqual(n, 1)
+
     def test_private_key_regex_is_bounded(self):
         import time as _t
         start = _t.time()
@@ -390,6 +397,18 @@ class GeminiStrengthToolTests(Workspace):
         text = res["content"][0]["text"]
         self.assertIn("**Sources**", text)
         self.assertEqual(text.count("https://example.org/a"), 1)
+
+    def test_deps_never_forwards_credentials_in_url_versions(self):
+        (self.root / "package.json").write_text(json.dumps({"dependencies": {
+            "private-lib": "git+https://bot:ghp_abcdefghijklmnopqrstuvwxyz0123456789@github.com/acme/lib.git",
+            "other": "https://user:hunter2@registry.example.com/other.tgz",
+            "lodash": "^4.17.21"}}))
+        res, body = self.call("gemini4_check_dependencies", {"paths": ["package.json"]}, grounded_reply("t"))
+        prompt = body["contents"][0]["parts"][-1]["text"]
+        self.assertNotIn("hunter2", prompt)
+        self.assertNotIn("ghp_abcdefghijklmnopqrstuvwxyz0123456789", prompt)
+        self.assertIn("- private-lib <url or path>  (package.json)", prompt)
+        self.assertIn("- lodash ^4.17.21  (package.json)", prompt)
 
     def test_deps_without_manifests_is_an_error(self):
         res, _ = self.call("gemini4_check_dependencies", {})
