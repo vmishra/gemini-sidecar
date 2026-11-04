@@ -40,6 +40,7 @@ import stat
 import tempfile
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -48,7 +49,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Dict, List, Optional, Tuple
 
 SERVER_NAME = "gemini4"
-SERVER_VERSION = "2.3.7"
+SERVER_VERSION = "2.3.8"
 DEFAULT_PROTOCOL_VERSION = "2025-06-18"
 
 _RPC_OUT: BinaryIO = sys.stdout.buffer
@@ -1085,7 +1086,15 @@ def estimate_cost(model: str, usage: Dict[str, int]) -> Optional[float]:
     return (fresh * p_in + cached * p_cached + out * p_out) / 1_000_000
 
 
+_USAGE_LOCK = threading.Lock()
+
+
 def _record_usage(model: str, usage: Dict[str, int]) -> None:
+    with _USAGE_LOCK:
+        _record_usage_locked(model, usage)
+
+
+def _record_usage_locked(model: str, usage: Dict[str, int]) -> None:
     row = USAGE.setdefault(model, {"calls": 0, "prompt": 0, "cached": 0, "output": 0, "thoughts": 0})
     row["calls"] += 1
     row["prompt"] += int(usage.get("promptTokenCount", 0)) + int(usage.get("toolUsePromptTokenCount", 0))
@@ -1232,6 +1241,109 @@ def call_gemini(
     }
 
 
+DEPS_BATCH_SIZE = 12
+DEPS_PARALLEL = 6
+
+
+def _deps_batch(model: str, rows: List[Tuple[str, str, str]], focus: str, today: str,
+                depth: int = 0) -> List[Dict[str, Any]]:
+    """Check one batch with search grounding. A batch that hits Gemini's tool-call limit is split in half."""
+    listing = redact_secrets("\n".join(f"- {pkg} {spec}  ({rel})" for rel, pkg, spec in rows))[0]
+    prompt = (f"## Dependencies to check (parsed exactly from the manifests)\n{listing}\n\n## Request\nToday is "
+              f"{today}. Check each package listed above." + (f" Focus: {focus}" if focus else ""))
+    try:
+        return [call_gemini(model, SYS_DEPS_BATCH, prompt, thinking_level="low", max_output_tokens=8192,
+                            tools=[{"googleSearch": {}}])]
+    except ToolError as exc:
+        if "TOO_MANY_TOOL_CALLS" in str(exc) and len(rows) > 1 and depth < 2:
+            mid = len(rows) // 2
+            return (_deps_batch(model, rows[:mid], focus, today, depth + 1)
+                    + _deps_batch(model, rows[mid:], focus, today, depth + 1))
+        raise
+
+
+_TABLE_SEP_RE = re.compile(r"^\|\s*:?-{2,}")
+
+
+def check_dependencies_batched(model: str, declared: List[Tuple[str, str, str]], focus: str,
+                               today: str) -> Tuple[str, Dict[str, Any]]:
+    """Check dependencies in parallel batches and merge them into one table, vulnerable packages first.
+
+    One grounded call per dozen packages keeps each call well under Gemini's tool-call limit and makes a
+    60-package manifest take about as long as a 12-package one."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    started = time.time()
+    batches = [declared[i:i + DEPS_BATCH_SIZE] for i in range(0, len(declared), DEPS_BATCH_SIZE)]
+
+    def run(batch: List[Tuple[str, str, str]]) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        try:
+            return _deps_batch(model, batch, focus, today), None
+        except ToolError as exc:
+            return [], f"{', '.join(pkg for _, pkg, _ in batch)} ({exc})"
+
+    with ThreadPoolExecutor(max_workers=min(DEPS_PARALLEL, len(batches))) as pool:
+        outcomes = list(pool.map(run, batches))
+
+    results = [r for res_list, _ in outcomes for r in res_list]
+    failed = [err for _, err in outcomes if err]
+    if not results:
+        raise ToolError("Dependency check failed for every batch: " + "; ".join(failed)[:600])
+
+    header = ("| Package | Declared version | Latest stable | Known vulnerabilities affecting the declared version "
+              "(ID, fixed in) | Breaking changes to plan for | Action |")
+    urgent: List[str] = []
+    rest: List[str] = []
+    notes: List[str] = []
+    for res in results:
+        in_notes = False
+        for line in res["text"].splitlines():
+            stripped = line.strip()
+            if stripped.upper().startswith("NOTES"):
+                in_notes = True
+                continue
+            if in_notes:
+                if stripped.startswith(("-", "*")):
+                    notes.append("- " + stripped.lstrip("-* ").strip())
+                continue
+            if not stripped.startswith("|") or _TABLE_SEP_RE.match(stripped):
+                continue
+            cells = [c.strip() for c in stripped.strip("|").split("|")]
+            if len(cells) < 4 or (cells[0].lower() == "package" and "declared" in cells[1].lower()):
+                continue
+            vuln = cells[3].lower()
+            (rest if (not vuln or "none" in vuln or vuln in ("-", "n/a")) else urgent).append(stripped)
+
+    parts = [header, "|" + "---|" * 6] + urgent + rest
+    if notes:
+        parts += ["", "**Risky upgrades**"] + notes
+    if failed:
+        parts += ["", "**Not checked** (retry for these): " + "; ".join(failed)]
+
+    usage: Dict[str, int] = {}
+    for res in results:
+        for key, val in (res.get("usage") or {}).items():
+            if isinstance(val, int):
+                usage[key] = usage.get(key, 0) + val
+    sources: List[Dict[str, str]] = []
+    for res in results:
+        for src in res.get("sources") or []:
+            if all(src["uri"] != s2["uri"] for s2 in sources):
+                sources.append(src)
+    costs = [r.get("cost_usd") for r in results]
+    merged = {
+        "text": "\n".join(parts),
+        "sources": sources,
+        "model": results[0]["model"],
+        "backend": results[0]["backend"],
+        "finish_reason": "",
+        "usage": usage,
+        "cost_usd": None if any(c is None for c in costs) else sum(costs),
+        "latency_s": round(time.time() - started, 1),
+    }
+    return merged["text"], merged
+
+
 def usage_footer(res: Dict[str, Any], scope: Optional[str] = None) -> str:
     u = res["usage"]
     bits = [
@@ -1320,12 +1432,22 @@ SYS_SECOND_OPINION = (
 )
 
 SYS_DEPS = (
-    "You are checking a project's dependencies against current, real-world information. Use Google Search for "
-    "every direct dependency. Output a Markdown table: Package | Declared version | Latest stable | "
+    "You are checking a project's dependencies against current, real-world information. Use Google Search; one "
+    "query can cover several packages, so keep the number of searches small. Output a Markdown table: Package | Declared version | Latest stable | "
     "Known vulnerabilities affecting the declared version (ID, fixed in) | Breaking changes to plan for | Action. "
     "Report a vulnerability only if you found a source for it; otherwise write 'none found'. Put the most urgent "
     "rows first. After the table, give a short upgrade order and say which upgrades are risky and why. "
     + UNTRUSTED_NOTE
+)
+
+SYS_DEPS_BATCH = (
+    "You are checking one batch of a project's dependencies against current, real-world information with Google "
+    "Search. Search efficiently: one query can cover several packages, and use no more than 8 searches. Output only "
+    "a Markdown table with exactly this header: | Package | Declared version | Latest stable | Known vulnerabilities "
+    "affecting the declared version (ID, fixed in) | Breaking changes to plan for | Action |, one row per listed "
+    "package, copying the declared version exactly. Report a vulnerability only if you found a source for it; "
+    "otherwise write 'none found'. After the table write a line 'NOTES:' and at most three short bullets about risky "
+    "upgrades in this batch. " + UNTRUSTED_NOTE
 )
 
 SYS_SPEC = (
@@ -2078,12 +2200,16 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
             declared_block = ("## Declared dependencies (parsed exactly from the manifests; copy these versions verbatim)\n"
                               + "\n".join(f"- {pkg} {spec}  ({rel})" for rel, pkg, spec in declared) + "\n\n")
             declared_block = redact_secrets(declared_block)[0]
+        model = _tier(args, "flash")
+        scope = describe_scope(meta) + "; grounded with Google Search (5,000 requests a month free, then $14 per 1,000)"
+        if declared:
+            text, res = check_dependencies_batched(model, declared, focus, today)
+            return _clip(text) + sources_block(res) + usage_footer(res, scope)
         prompt = (f"{corpus}\n\n{declared_block}## Request\nToday is {today}. Check these dependencies with Google "
                   "Search. In the 'Declared version' column, copy the declared version exactly as listed above."
                   + (f" Focus: {focus}" if focus else ""))
-        res = call_gemini(_tier(args, "flash"), SYS_DEPS, prompt, thinking_level="medium",
+        res = call_gemini(model, SYS_DEPS, prompt, thinking_level="low",
                           max_output_tokens=16384, tools=[{"googleSearch": {}}])
-        scope = describe_scope(meta) + "; grounded with Google Search (5,000 requests a month free, then $14 per 1,000)"
         return _clip(res["text"]) + sources_block(res) + usage_footer(res, scope)
 
     if name == "gemini4_spec_check":

@@ -875,5 +875,59 @@ class ContextBudgetTests(Workspace):
         self.assertIn("GEMINI4_MAX_CONTEXT_TOKENS", msg)
 
 
+class DependencyBatchTests(Workspace):
+    """Large manifests are checked in parallel batches and merged, vulnerable packages first."""
+
+    def fake_call(self, fail_over=None):
+        calls = []
+        def fake(model, system, prompt, **kw):
+            pkgs = [line[2:].split(" ")[0] for line in prompt.splitlines() if line.startswith("- ")]
+            calls.append(pkgs)
+            if fail_over and len(pkgs) > fail_over:
+                raise srv.ToolError("Gemini returned an empty answer (finishReason=TOO_MANY_TOOL_CALLS).")
+            rows = "\n".join(
+                f"| {p} | ^1.0.0 | 2.0.0 | {'CVE-2026-0001 (fixed in 1.2.0)' if p == 'pkg7' else 'none found'} | - | bump |"
+                for p in pkgs)
+            text = ("| Package | Declared version | Latest stable | Known vulnerabilities affecting the declared "
+                    "version (ID, fixed in) | Breaking changes to plan for | Action |\n|---|---|---|---|---|---|\n"
+                    + rows + "\nNOTES:\n- note for " + pkgs[0])
+            return {"text": text, "sources": [{"title": "s", "uri": "https://example.org/" + pkgs[0]}],
+                    "model": model, "backend": "test", "finish_reason": "STOP",
+                    "usage": {"promptTokenCount": 10, "candidatesTokenCount": 5}, "cost_usd": 0.001, "latency_s": 1}
+        return fake, calls
+
+    def manifest(self, n):
+        (self.root / "package.json").write_text(json.dumps({"dependencies": {f"pkg{i}": "^1.0.0" for i in range(n)}}))
+
+    def test_large_manifest_is_split_and_merged(self):
+        self.manifest(30)
+        fake, calls = self.fake_call()
+        with mock.patch.object(srv, "call_gemini", fake):
+            out = srv.execute_tool("gemini4_check_dependencies", {"paths": ["package.json"]})
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(sorted(p for c in calls for p in c), sorted(f"pkg{i}" for i in range(30)))
+        rows = [l for l in out.splitlines() if l.startswith("| pkg")]
+        self.assertEqual(len(rows), 30)
+        self.assertTrue(rows[0].startswith("| pkg7 "))  # the vulnerable package comes first
+        self.assertEqual(out.count("| Package |"), 1)
+        self.assertIn("**Risky upgrades**", out)
+        self.assertIn("input 30 tok", out)
+
+    def test_batch_over_tool_call_limit_is_split(self):
+        self.manifest(12)
+        fake, calls = self.fake_call(fail_over=6)
+        with mock.patch.object(srv, "call_gemini", fake):
+            out = srv.execute_tool("gemini4_check_dependencies", {"paths": ["package.json"]})
+        self.assertEqual(len([l for l in out.splitlines() if l.startswith("| pkg")]), 12)
+        self.assertNotIn("Not checked", out)
+
+    def test_failed_batch_is_reported_not_dropped(self):
+        self.manifest(14)
+        fake, _ = self.fake_call(fail_over=1)  # every split still fails
+        with mock.patch.object(srv, "call_gemini", fake):
+            out = srv.execute_tool("gemini4_check_dependencies", {"paths": ["package.json"]})
+        self.assertIn("Not checked", out)
+
+
 if __name__ == "__main__":
     unittest.main()

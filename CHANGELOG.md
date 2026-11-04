@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.3.8 (2026-11-05)
+
+### Fixed
+- `/gemini:deps` checks large manifests in parallel batches of about a dozen packages and merges the results, with vulnerable packages first. A 50-package `package.json` went from about 4 minutes, with intermittent `TOO_MANY_TOOL_CALLS` failures, to about a minute. A batch that still hits the tool-call limit is split and retried, and any batch that cannot be checked is listed instead of silently dropped.
+- Usage accounting is thread-safe.
+
 ## 2.3.7 (2026-11-05)
 
 ### Added
