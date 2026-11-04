@@ -39,6 +39,10 @@ Run `/gemini:status` to check the setup, then `/gemini:analyze what does this re
 
 ## Commands
 
+<p align="center">
+  <img src="./assets/commands-map.svg" alt="Thirteen commands in four groups: Understand, Protect, Change, Debug, with the model each uses" width="100%" />
+</p>
+
 | Command | Use it when you want to… | Example |
 |---|---|---|
 | `/gemini:analyze` | understand code too big to read yourself | `/gemini:analyze how is auth enforced across services? src/ api/` |
@@ -103,7 +107,7 @@ Every replay below is a real run, trimmed to fit.
 ## How it works
 
 <p align="center">
-  <img src="./assets/how-it-works.svg" alt="The agent passes paths to the local MCP server, which reads and filters the files and sends 103,003 tokens to Gemini; a 1,958-token answer returns" width="100%" />
+  <img src="./assets/anim-how-it-works.svg" alt="Animated: the agent passes paths to the local MCP server, which reads and filters the files and sends 103,003 tokens to Gemini; a 1,958-token answer returns" width="100%" />
 </p>
 
 Your agent sends **paths**, not file contents. A small server on your machine reads the files, filters out secrets, and sends the rest to Gemini's 1M-token context. Only the answer comes back. The files never pass through your agent's context window, so they don't crowd out your conversation or get billed again on every later turn.
@@ -111,6 +115,10 @@ Your agent sends **paths**, not file contents. A small server on your machine re
 ## Security and privacy
 
 It's built to run on real codebases, which means untrusted code, prompt injection and secrets lying around.
+
+<p align="center">
+  <img src="./assets/anim-security-pipeline.svg" alt="Animated: files pass four checks (inside the project, tracked by git, not a secret file, tokens redacted) before being sent; rejected files drop out with the reason" width="100%" />
+</p>
 
 **What it protects**
 - **It only reads your project.** Paths that resolve outside the project folder are refused, including `..` and symlinks that point elsewhere. It won't run with your home directory or `/` as the project.
