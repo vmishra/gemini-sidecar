@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.3.3 (2026-11-04)
+
+### Security
+- Secret-assignment redaction:
+  - covers base64 values with `=` padding again (a 2.3.2 regression)
+  - covers hyphenated names such as `api-key` and `X-Api-Key`
+  - bounds the work per match, so adversarial input can't make the scan quadratic
+
 ## 2.3.2 (2026-11-04)
 
 ### Security

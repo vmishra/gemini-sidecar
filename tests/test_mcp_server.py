@@ -564,6 +564,19 @@ class PreReleaseSecurityTests(Workspace):
             srv.redact_secrets(text)
         self.assertLess(_t.time() - start, 3.0)
 
+    def test_base64_padded_and_hyphenated_secrets_are_redacted(self):
+        for text, secret in (("SECRET_KEY=dGhpcyBpcyBhIHNlY3JldA==", "dGhpcyBpcyBhIHNlY3JldA=="),
+                             ('api-key: "abcdef123456"', "abcdef123456"),
+                             ("X-Api-Key: abcdef1234567890", "abcdef1234567890")):
+            self.assertNotIn(secret, srv.redact_secrets(text)[0], text)
+
+    def test_assignment_scan_is_linear(self):
+        import time as _t
+        start = _t.time()
+        for text in ("token=" * 200_000, "password='x " * 60_000, "password=" * 50_000 + '"'):
+            srv.redact_secrets(text)
+        self.assertLess(_t.time() - start, 3.0)
+
     def test_long_values_and_long_name_prefixes_are_still_redacted(self):
         for text in ("API_TOKEN=" + "v" * 2_000, "X" * 200 + "_PASSWORD=hunter2secret",
                      "X" * 200 + '_secret = "abcdefgh123"', 'password = "' + "v" * 2_000 + '"'):
