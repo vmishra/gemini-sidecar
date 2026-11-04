@@ -66,7 +66,9 @@ def main() -> int:
             + " (Set GEMINI_SIDECAR_READ_GUARD=off to disable.)",
         }
     else:
-        decision = {"hookEventName": "PreToolUse", "permissionDecision": "allow", "additionalContext": advice}
+        # No permissionDecision: the guard only adds advice and never approves a read on its own,
+        # so the user's normal permission rules still decide.
+        decision = {"hookEventName": "PreToolUse", "additionalContext": advice}
     json.dump({"hookSpecificOutput": decision}, sys.stdout)
     return 0
 

@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.2.1 (2026-11-04)
+
+### Security
+- The read guard's `suggest` mode no longer returns a permission decision. It only adds advice, so your permission rules still decide whether a read is allowed.
+
 ## 2.2.0 (2026-11-04)
 
 ### Added

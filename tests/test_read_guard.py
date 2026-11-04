@@ -51,7 +51,8 @@ class ReadGuardTests(unittest.TestCase):
 
     def test_suggest_allows_with_context(self):
         _, out = run_hook(self.read(self.big), "suggest")
-        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "allow")
+        # Never auto-approve: the normal permission flow must still decide.
+        self.assertNotIn("permissionDecision", out["hookSpecificOutput"])
         self.assertIn("offset and limit", out["hookSpecificOutput"]["additionalContext"])
 
     def test_partial_small_staged_and_missing_reads_pass(self):
