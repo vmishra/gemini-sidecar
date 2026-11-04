@@ -1,6 +1,6 @@
 {
   "name": "gemini",
-  "version": "2.3.3",
+  "version": "2.3.4",
   "description": "Gemini MCP tools, rules and subagents for Cursor: large-codebase analysis, security audit, diff review and staged long-form generation.",
   "author": {
     "name": "Vikas Mishra"

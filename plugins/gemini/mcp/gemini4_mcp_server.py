@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Dict, List, Optional, Tuple
 
 SERVER_NAME = "gemini4"
-SERVER_VERSION = "2.3.3"
+SERVER_VERSION = "2.3.4"
 DEFAULT_PROTOCOL_VERSION = "2025-06-18"
 
 _RPC_OUT: BinaryIO = sys.stdout.buffer
@@ -280,7 +280,7 @@ def _redact_private_keys(text: str) -> Tuple[str, int]:
 # Identifier (letters, digits, _ and -) followed by = or :. Matches start only at identifier boundaries.
 _ASSIGN_RE = re.compile(r"(?<![A-Za-z0-9_\-])([A-Za-z0-9_\-]+)([\"']?[ \t]*[:=][ \t]*)")
 _SECRET_NAME_RE = re.compile(_SECRET_NAME.replace("[_-]?", "[_\\-]?"), re.I)
-_QUOTED_VALUE_RE = re.compile(r"[^\"'\s]*")      # inside quotes, up to the closing quote or whitespace
+_QUOTED_VALUE_RE = {'"': re.compile(r'[^"\s]*'), "'": re.compile(r"[^'\s]*")}  # to the matching quote
 _BARE_VALUE_RE = re.compile(r"[^\s\"'#()]*")     # unquoted value; '=' allowed (base64 padding)
 _LINE_REST_RE = re.compile(r"[ \t\r]*(?:\n|$)")
 
@@ -288,34 +288,42 @@ _LINE_REST_RE = re.compile(r"[ \t\r]*(?:\n|$)")
 def _redact_secret_assignments(text: str) -> Tuple[str, int]:
     """Redact literal values assigned to secret-named keys: a quoted string, or a single unspaced value
     running to the end of the line (.env / YAML / header style). Code expressions are left alone.
-    Each character is examined a bounded number of times, so the pass is linear in the input size."""
+
+    Linear time: a value scan that is rejected remembers where it ended. A later scan of the same kind
+    that starts inside that range must end at the same place, so it would be rejected too and is skipped.
+    Scans of a different kind (a quoted value after a rejected bare one) are still made."""
     out: List[str] = []
     pos = count = 0
-    skip_until = 0
     n = len(text)
+    bare_rejected_end = -1
+    quoted_rejected_end = {'"': -1, "'": -1}
     for m in _ASSIGN_RE.finditer(text):
-        if m.start() < max(pos, skip_until) or not _SECRET_NAME_RE.search(m.group(1)):
+        if m.start() < pos or not _SECRET_NAME_RE.search(m.group(1)):
             continue
         i = m.end()
         if i < n and text[i] in "\"'":
             quote = text[i]
-            v = _QUOTED_VALUE_RE.match(text, i + 1)
-            j = v.end()
-            skip_until = j
+            if i + 1 < quoted_rejected_end[quote]:
+                continue
+            j = _QUOTED_VALUE_RE[quote].match(text, i + 1).end()
             if j < n and text[j] == quote and j - (i + 1) >= 6:
                 out.append(text[pos:i + 1])
                 out.append("[REDACTED:secret-assignment]")
                 pos = j
                 count += 1
+            else:
+                quoted_rejected_end[quote] = j
             continue
-        v = _BARE_VALUE_RE.match(text, i)
-        j = v.end()
-        skip_until = j
+        if i < bare_rejected_end:
+            continue
+        j = _BARE_VALUE_RE.match(text, i).end()
         if j - i >= 6 and _LINE_REST_RE.match(text, j):
             out.append(text[pos:i])
             out.append("[REDACTED:secret-assignment]")
             pos = j
             count += 1
+        else:
+            bare_rejected_end = j
     out.append(text[pos:])
     return "".join(out), count
 

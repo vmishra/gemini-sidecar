@@ -577,6 +577,43 @@ class PreReleaseSecurityTests(Workspace):
             srv.redact_secrets(text)
         self.assertLess(_t.time() - start, 3.0)
 
+    def test_quotes_and_shared_lines_do_not_hide_secrets(self):
+        for text, secret in (('token_type=Bearer,api_key="abcdef123456"', "abcdef123456"),
+                             ('token=api_key="secretvalue1"', "secretvalue1"),
+                             ('password = "it\'s-a-secret-99"', "it's-a-secret-99"),
+                             ("password = 'say\"hi\"secret'", 'say"hi"secret')):
+            self.assertNotIn(secret, srv.redact_secrets(text)[0], text)
+
+    def test_fast_assignment_scan_matches_simple_reference(self):
+        """The skip-ahead optimisations must never change what is redacted."""
+        import random
+
+        def reference(text):
+            out, pos, n = [], 0, len(text)
+            for m in srv._ASSIGN_RE.finditer(text):
+                if m.start() < pos or not srv._SECRET_NAME_RE.search(m.group(1)):
+                    continue
+                i = m.end()
+                if i < n and text[i] in "\"'":
+                    j = srv._QUOTED_VALUE_RE[text[i]].match(text, i + 1).end()
+                    if j < n and text[j] == text[i] and j - (i + 1) >= 6:
+                        out += [text[pos:i + 1], "[REDACTED:secret-assignment]"]
+                        pos = j
+                    continue
+                j = srv._BARE_VALUE_RE.match(text, i).end()
+                if j - i >= 6 and srv._LINE_REST_RE.match(text, j):
+                    out += [text[pos:i], "[REDACTED:secret-assignment]"]
+                    pos = j
+            out.append(text[pos:])
+            return "".join(out)
+
+        pieces = ["token", "api_key", "password", "x", "abcdef", "123456", "=", ":", " ", '"', "'", ",", "\n",
+                  "==", "-", "_", "(", ")", "#", "secret", "Bearer"]
+        rng = random.Random(1234)
+        for _ in range(4000):
+            text = "".join(rng.choice(pieces) for _ in range(rng.randint(1, 40)))
+            self.assertEqual(srv._redact_secret_assignments(text)[0], reference(text), repr(text))
+
     def test_long_values_and_long_name_prefixes_are_still_redacted(self):
         for text in ("API_TOKEN=" + "v" * 2_000, "X" * 200 + "_PASSWORD=hunter2secret",
                      "X" * 200 + '_secret = "abcdefgh123"', 'password = "' + "v" * 2_000 + '"'):

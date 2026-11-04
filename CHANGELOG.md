@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.3.4 (2026-11-04)
+
+### Security
+- Secret-assignment redaction:
+  - quoted values stop only at their matching quote
+  - an assignment that shares a line with an earlier one (`token_type=Bearer,api_key="..."`) is no longer skipped
+  - the skip-ahead optimisation is proven equivalent to a simple reference implementation by a randomised test
+
 ## 2.3.3 (2026-11-04)
 
 ### Security
