@@ -857,6 +857,18 @@ class ContextBudgetTests(Workspace):
         self.assertNotIn("tracked-ignored-canary", corpus)
         self.assertIn("local.cfg", meta["skipped"]["ignored"])
 
+    def test_git_listing_failure_fails_closed(self):
+        (self.root / "notes.local").write_text("untracked-ignored-canary\n")
+        (self.root / ".gitignore").write_text("*.log\n*.local\n")
+        real_git = srv._git
+        def flaky(root, *args, **kw):
+            return None if args[:1] == ("ls-files",) else real_git(root, *args, **kw)
+        with mock.patch.object(srv, "_git", flaky):
+            with self.assertRaises(srv.ToolError):
+                srv.collect_files(["."], self.root)
+            with self.assertRaises(srv.ToolError):
+                srv.collect_files(["**/*"], self.root)
+
     def test_token_limit_error_has_actionable_hint(self):
         msg = srv._http_error_message(400, json.dumps({"error": {"message":
               "The input token count (1210000) exceeds the maximum number of tokens allowed (1048576)."}}), "m")

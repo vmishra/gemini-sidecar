@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.3.6 (2026-11-05)
+
+### Security
+- Inside a git repository, file listing no longer falls back to walking the disk when `git ls-files` fails or times out. The walk would have included untracked files that `.gitignore` excludes; the call now stops with a clear error instead.
+
 ## 2.3.5 (2026-11-05)
 
 ### Fixed

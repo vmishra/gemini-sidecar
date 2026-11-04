@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Dict, List, Optional, Tuple
 
 SERVER_NAME = "gemini4"
-SERVER_VERSION = "2.3.5"
+SERVER_VERSION = "2.3.6"
 DEFAULT_PROTOCOL_VERSION = "2025-06-18"
 
 _RPC_OUT: BinaryIO = sys.stdout.buffer
@@ -430,6 +430,9 @@ def _expand_dir(directory: Path, root: Path, use_git: bool) -> List[Path]:
                     continue
                 files.append(root / item)
             return sorted(files)
+        # Inside a git repository the listing is what applies .gitignore. Walking the disk instead
+        # would pick up untracked ignored files (local configs, logs), so fail closed.
+        raise ToolError("Could not list files with git (it failed or timed out). Retry, or pass narrower `paths`.")
     files = []
     for cur, dirs, names in os.walk(directory):
         dirs[:] = sorted(d for d in dirs if d not in IGNORE_DIRS and not d.startswith("."))
