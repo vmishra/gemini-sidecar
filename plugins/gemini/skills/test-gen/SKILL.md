@@ -3,7 +3,7 @@ name: test-gen
 description: Generate tests for the given source files with Gemini, staged for review, then optionally apply and run them.
 argument-hint: "<paths...> [extra instructions]"
 disable-model-invocation: true
-allowed-tools: Glob Read mcp__plugin_gemini_gemini4__gemini4_long_decode_refactor
+allowed-tools: Glob Read(./**) mcp__plugin_gemini_gemini4__gemini4_long_decode_refactor
 ---
 
 # Generate tests with Gemini

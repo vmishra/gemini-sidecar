@@ -505,6 +505,120 @@ class ContextEfficiencyTests(Workspace):
         self.assertLess(size, 8_500, f"tool schemas grew to {size} bytes; trim descriptions")
 
 
+class PreReleaseSecurityTests(Workspace):
+    """Findings from the pre-release adversarial review; each reproduces the original attack."""
+
+    def test_repo_git_config_cannot_run_commands(self):
+        marker = self.root.parent / f"pwn-{self.root.name}"
+        for key, cmd in (("core.fsmonitor", f"touch {marker}-fsmonitor; false"),
+                         ("diff.external", f"sh -c 'touch {marker}-external'"),
+                         ("core.pager", f"touch {marker}-pager"),
+                         ("filter.evil.clean", f"sh -c 'touch {marker}-filter; cat'")):
+            subprocess.run(["git", "config", key, cmd], cwd=self.root, check=True)
+        (self.root / ".gitattributes").write_text("*.py filter=evil diff=evil\n")
+        (self.root / "src" / "app.py").write_text("def add(a, b):\n    return a - b\n")
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "k"}), \
+             mock.patch.object(srv.urllib.request, "urlopen", return_value=gemini_reply("ok")) as op:
+            srv.execute_tool("gemini4_review_diff", {"base": "HEAD"})
+            srv.collect_files(["."], self.root)
+        sent = json.loads(op.call_args[0][0].data)["contents"][0]["parts"][0]["text"]
+        self.assertIn("return a - b", sent)
+        self.assertEqual([p.name for p in self.root.parent.glob(f"pwn-{self.root.name}*")], [])
+
+    def test_gitattributes_cannot_hide_a_change(self):
+        (self.root / ".gitattributes").write_text("app.py -diff\n")
+        subprocess.run(["git", "add", ".gitattributes"], cwd=self.root, check=True)
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "a"],
+                       cwd=self.root, check=True)
+        (self.root / "src" / "app.py").write_text("def add(a, b):\n    return backdoor()\n")
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "k"}), \
+             mock.patch.object(srv.urllib.request, "urlopen", return_value=gemini_reply("ok")) as op:
+            srv.execute_tool("gemini4_review_diff", {"base": "HEAD", "include_full_files": False})
+        self.assertIn("return backdoor()", json.loads(op.call_args[0][0].data)["contents"][0]["parts"][0]["text"])
+
+    def test_changed_binary_files_are_listed_not_diffed(self):
+        # logo.png is committed by the fixture.
+        (self.root / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n\xf3\xff\x00\x01binary")
+        (self.root / "src" / "app.py").write_text("def add(a, b):\n    return a - b\n")
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "k"}), \
+             mock.patch.object(srv.urllib.request, "urlopen", return_value=gemini_reply("ok")) as op:
+            text = srv.execute_tool("gemini4_review_diff", {"base": "HEAD"})
+        sent = json.loads(op.call_args[0][0].data)["contents"][0]["parts"][0]["text"]
+        self.assertIn("return a - b", sent)
+        self.assertNotIn("\\xf3", sent)
+        self.assertIn("binary files changed, not reviewed: logo.png", text)
+
+    def test_gitignored_files_skipped_even_when_named(self):
+        (self.root / "local_settings.py").write_text("DB = 'prod'\n")
+        (self.root / ".gitignore").write_text("*.log\nlocal_settings.py\n")
+        with self.assertRaises(srv.ToolError):
+            srv.collect_files(["local_settings.py"], self.root)
+        with mock.patch.dict(os.environ, {"GEMINI4_INCLUDE_IGNORED": "1"}):
+            _, meta = srv.collect_files(["local_settings.py"], self.root)
+        self.assertEqual(meta["files"], ["local_settings.py"])
+
+    def test_secret_dirs_and_embedded_repos_are_never_read(self):
+        for rel in (".docker/config.json", ".aws/config", ".kube/config", "client_secret_123.json", "token.json"):
+            path = self.root / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("secret-material\n")
+        bare = self.root / "vendor_repo"
+        subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+        corpus, meta = srv.collect_files(["."], self.root, numbered=False)
+        self.assertNotIn("secret-material", corpus)
+        self.assertFalse([f for f in meta["files"] if f.startswith("vendor_repo/")])
+
+    def test_more_token_formats_are_redacted(self):
+        samples = ["aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+                   "glpat-abcdefghijklmnopqrstuvwx", "npm_" + "a" * 36, "hf_" + "b" * 34, "sk_test_" + "c" * 24,
+                   "GOCSPX-" + "d" * 28, "1//0" + "e" * 30, 'DATABASE_PASSWORD="hunter2hunter2"',
+                   "postgres://admin:p@ss/w0rd@db.internal:5432/app",
+                   "-----BEGIN PGP PRIVATE KEY BLOCK-----\nabc\n-----END PGP PRIVATE KEY BLOCK-----"]
+        for sample in samples:
+            out, n = srv.redact_secrets(sample)
+            self.assertGreater(n, 0, sample)
+        for keep in ('token = request.headers.get("Authorization")', "https://registry.npmjs.org/@scope/pkg"):
+            self.assertEqual(srv.redact_secrets(keep)[0], keep)
+
+    def test_typed_secrets_are_redacted_from_prompts(self):
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "k"}), \
+             mock.patch.object(srv.urllib.request, "urlopen", return_value=gemini_reply("ok")) as op:
+            srv.execute_tool("gemini4_analyze_codebase",
+                             {"question": "is sk-ant-" + "x" * 30 + " valid?", "paths": ["src/app.py"]})
+        self.assertNotIn("sk-ant-" + "x" * 30, json.loads(op.call_args[0][0].data)["contents"][0]["parts"][-1]["text"])
+
+    def test_long_lines_do_not_hang_scanning(self):
+        import time as _t
+        (self.root / "long.log").write_text(("at " + "x" * 300_000 + "\n") * 3 + "FAILED test_x\n")
+        start = _t.time()
+        srv.read_log_digest("long.log", self.root, 50_000)
+        srv.redact_secrets("-----BEGIN RSA PRIVATE KEY-----\n" * 50_000)
+        self.assertLess(_t.time() - start, 3.0)
+
+    def test_spec_url_with_credentials_is_refused(self):
+        with self.assertRaises(srv.ToolError):
+            srv.execute_tool("gemini4_spec_check", {"spec": "https://user:pw@example.com/spec", "paths": ["src/"]})
+
+    def test_staging_survives_conflicts_and_flags_sensitive_targets(self):
+        reply = gemini_reply("<<<FILE a>>>\n1\n<<<END FILE>>>\n<<<FILE a/b>>>\n2\n<<<END FILE>>>\n"
+                             "<<<FILE " + "n" * 300 + ".py>>>\n3\n<<<END FILE>>>\n"
+                             "<<<FILE .github/workflows/ci.yml>>>\nx\n<<<END FILE>>>\n## Notes\nok")
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "k"}), \
+             mock.patch.object(srv.urllib.request, "urlopen", return_value=reply):
+            text = srv.execute_tool("gemini4_long_decode_refactor", {"spec": "s", "paths": ["src/app.py"]})
+        self.assertIn("WARNING", text)
+        self.assertIn(".github/workflows/ci.yml", text)
+        self.assertIn("Not staged", text)
+
+    def test_malformed_rpc_messages_do_not_kill_the_server(self):
+        msgs = ['{"jsonrpc":"2.0","id":1,"method":"tools/call","params":[1]}', "[" * 50_000,
+                "Content-Length: -5", '{"jsonrpc":"2.0","id":2,"method":"ping"}']
+        proc = subprocess.run([sys.executable, str(SERVER)], input="\n".join(msgs) + "\n",
+                              capture_output=True, text=True, timeout=30)
+        replies = [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
+        self.assertIn(2, [r.get("id") for r in replies])
+
+
 class ProtocolTests(unittest.TestCase):
     def test_stdio_handshake_and_tool_list(self):
         msgs = [

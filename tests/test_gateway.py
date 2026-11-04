@@ -22,7 +22,7 @@ for _name in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "ANTHROPIC_UPSTREAM_KEY", "ANT
 
 _TMP_HOME = tempfile.mkdtemp(prefix="gemini4-gw-test-")
 os.environ["HOME"] = _TMP_HOME
-os.environ["GEMINI4_GATEWAY_TOKEN"] = "test-token-0123456789abcdef"
+os.environ["GEMINI4_GATEWAY_TOKEN"] = "test-token-0123456789abcdef0123456789"
 os.environ["GEMINI4_GATEWAY_LOG"] = "0"
 TOKEN = os.environ["GEMINI4_GATEWAY_TOKEN"]
 
@@ -622,7 +622,8 @@ class AnthropicPassthroughTests(ServerTestCase):
                 raise http_error(429, {"type": "error", "error": {"type": "rate_limit_error", "message": "x"}})
             return FakeResponse(json.dumps(gemini_ok([{"text": "from gemini"}])).encode("utf-8"))
 
-        env = {"ANTHROPIC_UPSTREAM_KEY": "upstream-key", "GEMINI_API_KEY": "fake-gemini-key"}
+        env = {"ANTHROPIC_UPSTREAM_KEY": "upstream-key", "GEMINI_API_KEY": "fake-gemini-key",
+               "GEMINI4_FAILOVER_TO_GEMINI": "1"}
         with mock.patch.object(urllib.request, "urlopen", fake), mock.patch.dict(os.environ, env):
             resp, payload = self.request("POST", "/v1/messages", {
                 "model": "claude-opus-5-5", "max_tokens": 10, "metadata": {"user_id": "fo-http"},
@@ -633,6 +634,23 @@ class AnthropicPassthroughTests(ServerTestCase):
         pin = gw.SESSION_PINS.get("fo-http")
         self.assertTrue(pin["failover"])
         self.assertEqual(pin["model"], "gemini/gemini-4-argon")
+
+    def test_429_is_returned_not_resent_to_google_by_default(self):
+        calls = []
+
+        def fake(req, timeout=None, context=None):
+            calls.append(req)
+            raise http_error(429, {"type": "error", "error": {"type": "rate_limit_error", "message": "x"}})
+
+        env = {"ANTHROPIC_UPSTREAM_KEY": "upstream-key", "GEMINI_API_KEY": "fake-gemini-key"}
+        with mock.patch.object(urllib.request, "urlopen", fake), mock.patch.dict(os.environ, env):
+            os.environ.pop("GEMINI4_FAILOVER_TO_GEMINI", None)
+            resp, _ = self.request("POST", "/v1/messages", {
+                "model": "claude-opus-5-5", "max_tokens": 10, "metadata": {"user_id": "no-fo"},
+                "messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual(resp.status, 429)
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("googleapis", calls[0].full_url)
 
     def test_missing_upstream_key(self):
         resp, payload = self.request("POST", "/v1/messages", {
@@ -686,3 +704,52 @@ class TokenAndCliTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HardeningTests(unittest.TestCase):
+    """Findings from the pre-release security review."""
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp()
+        self.env = mock.patch.dict(os.environ, {"HOME": self.home})
+        self.env.start()
+        os.environ.pop("GEMINI4_GATEWAY_TOKEN", None)
+
+    def tearDown(self):
+        self.env.stop()
+
+    def test_short_env_token_is_refused(self):
+        with mock.patch.dict(os.environ, {"GEMINI4_GATEWAY_TOKEN": "short"}):
+            with self.assertRaises(RuntimeError):
+                gw.load_or_create_token()
+
+    def test_token_file_created_private_and_reused(self):
+        token, path, created = gw.load_or_create_token()
+        self.assertTrue(created)
+        self.assertGreaterEqual(len(token), 32)
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+        self.assertEqual(gw.load_or_create_token()[0], token)
+
+    def test_loose_permissions_and_symlinks_are_refused(self):
+        token, path, _ = gw.load_or_create_token()
+        os.chmod(path, 0o644)
+        with self.assertRaises(RuntimeError):
+            gw.load_or_create_token()
+        os.remove(path)
+        target = os.path.join(self.home, "attacker-token")
+        with open(target, "w") as fh:
+            fh.write("x" * 40)
+        os.symlink(target, path)
+        with self.assertRaises(RuntimeError):
+            gw.load_or_create_token()
+
+    def test_non_finite_budget_is_refused(self):
+        for bad in ("nan", "inf", "-1"):
+            with mock.patch.dict(os.environ, {"GEMINI4_GLOBAL_BUDGET_USD": bad}):
+                with self.assertRaises(RuntimeError):
+                    gw._env_float("GEMINI4_GLOBAL_BUDGET_USD")
+
+    def test_connection_cap_exists(self):
+        self.assertLessEqual(gw.MAX_CONNECTIONS, 256)
+        self.assertLessEqual(gw.GatewayHandler.timeout, 10)
+

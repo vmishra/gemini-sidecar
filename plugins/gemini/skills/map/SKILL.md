@@ -3,7 +3,7 @@ name: map
 description: Read the whole repository and write an ARCHITECTURE.md onboarding guide - components, data flow, how to run and test, where to start - staged for review.
 argument-hint: "[paths...] [audience or emphasis]"
 disable-model-invocation: true
-allowed-tools: Read mcp__plugin_gemini_gemini4__gemini4_long_decode_refactor
+allowed-tools: Read(./**) mcp__plugin_gemini_gemini4__gemini4_long_decode_refactor
 ---
 
 # Repository map with Gemini

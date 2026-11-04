@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Dict, List, Optional, Tuple
 
 SERVER_NAME = "gemini4"
-SERVER_VERSION = "2.2.1"
+SERVER_VERSION = "2.3.0"
 DEFAULT_PROTOCOL_VERSION = "2025-06-18"
 
 _RPC_OUT: BinaryIO = sys.stdout.buffer
@@ -148,22 +148,41 @@ SECRET_FILE_PATTERNS = [
     "*credentials*.json", "service-account*.json", "*serviceaccount*.json",
     "secrets.*", "secret.*", "*.secret", "*.secrets", "kubeconfig", "*.kubeconfig",
     ".pgpass", ".htpasswd", ".my.cnf", "*.asc", "*.gpg", "*.kdbx", "*.ovpn", ".boto",
+    "*.env.*", "client_secret*.json", "token.json", "*token*.json", "application_default_credentials.json",
+    "known_hosts", "authorized_keys", "*.p8", "*.der", "*.crt.key", "htpasswd", ".s3cfg", ".terraformrc", "*.vault",
 ]
 SECRET_FILE_ALLOW = {".env.example", ".env.sample", ".env.template", "env.example"}
 
+_SECRET_NAME = (r"(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|client[_-]?secret|"
+                r"private[_-]?key|auth[_-]?key)")
 SECRET_CONTENT_PATTERNS: List[Tuple[str, "re.Pattern[str]"]] = [
-    ("private-key", re.compile(r"-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----[\s\S]{0,16384}?-----END [A-Z ]{0,40}PRIVATE KEY-----")),
     ("google-api-key", re.compile(r"AIza[0-9A-Za-z_\-]{35}")),
     ("gcp-oauth-token", re.compile(r"ya29\.[0-9A-Za-z_\-]{20,}")),
+    ("google-refresh-token", re.compile(r"\b1//0[0-9A-Za-z_\-]{20,}")),
+    ("google-client-secret", re.compile(r"\bGOCSPX-[0-9A-Za-z_\-]{20,}")),
     ("anthropic-key", re.compile(r"sk-ant-[0-9A-Za-z_\-]{20,}")),
-    ("openai-key", re.compile(r"sk-(?:proj-)?[0-9A-Za-z_\-]{32,}")),
+    ("openai-key", re.compile(r"\bsk-(?:proj-)?[0-9A-Za-z_\-]{32,}")),
     ("aws-access-key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
+    ("aws-secret-key", re.compile(r"(?i)(?<=aws_secret_access_key)(\s*[=:]\s*[\"']?)[0-9A-Za-z/+=]{40}")),
     ("github-token", re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[0-9A-Za-z]{36}\b|github_pat_[0-9A-Za-z_]{40,}")),
+    ("gitlab-token", re.compile(r"\bglpat-[0-9A-Za-z_\-]{20,}")),
+    ("npm-token", re.compile(r"\bnpm_[0-9A-Za-z]{36}\b")),
+    ("huggingface-token", re.compile(r"\bhf_[0-9A-Za-z]{30,}")),
     ("slack-token", re.compile(r"\bxox[abposr]-[0-9A-Za-z\-]{10,}")),
-    ("stripe-key", re.compile(r"\b[rs]k_live_[0-9A-Za-z]{20,}")),
+    ("stripe-key", re.compile(r"\b[rs]k_(?:live|test)_[0-9A-Za-z]{20,}")),
     ("jwt", re.compile(r"\beyJ[0-9A-Za-z_\-]{10,}\.eyJ[0-9A-Za-z_\-]{10,}\.[0-9A-Za-z_\-]{10,}")),
-    # user:password@ inside URLs (git remotes, registry URLs, connection strings)
-    ("url-credentials", re.compile(r"(?<=://)[^/\s:@'\"]{1,256}:[^/\s@'\"]{1,256}(?=@)")),
+    # userinfo inside URLs (git remotes, registries, connection strings): user:pass@ or token@
+    # user:password@host (the password may contain / or @) or token@host; scoped paths like /@scope/ are not userinfo
+    ("url-credentials", re.compile(
+        r"(?<=://)(?:[^\s'\"/@:<>]{1,256}:[^\s'\"<>]{1,512}|[A-Za-z0-9_\-]{12,512})"
+        r"(?=@[A-Za-z0-9.\-]+(?:[:/?#\s'\"]|$))")),
+    # Secret-named assignments, but only literal values: a quoted string, or a whole NAME=value line
+    # (.env style). Code expressions such as `token = request.headers.get(...)` are left intact.
+    ("secret-assignment", re.compile(
+        r"(?i)(?<![A-Za-z0-9_])((?:[A-Za-z0-9_]*_)?" + _SECRET_NAME + r"[A-Za-z0-9_]*[\"']?\s*[:=]\s*)"
+        r"([\"'])([^\"'\s]{6,})\2")),
+    ("secret-assignment", re.compile(
+        r"(?im)^(\s*(?:export\s+)?[A-Za-z0-9_]*" + _SECRET_NAME + r"[A-Za-z0-9_]*\s*=\s*)([^\s\"'#()]{6,})\s*$")),
 ]
 
 
@@ -205,8 +224,33 @@ def _is_within(path: Path, root: Path) -> bool:
         return False
 
 
+# Directories that hold credentials or another repository's internals; nothing under them is read.
+SECRET_DIRS = {".git", ".ssh", ".gnupg", ".aws", ".azure", ".kube", ".docker", ".config/gcloud", "gcloud"}
+
+
 def _has_git_segment(parts: Tuple[str, ...]) -> bool:
-    return any(part.lower() == ".git" for part in parts)
+    lowered = [p.lower() for p in parts]
+    if any(p in SECRET_DIRS for p in lowered):
+        return True
+    return any(f"{a}/{b}" in SECRET_DIRS for a, b in zip(lowered, lowered[1:]))
+
+
+def _is_git_dir(path: Path) -> bool:
+    """A bare repository or .git directory (HEAD + objects/ + refs/): its config can hold credentials."""
+    try:
+        return (path / "HEAD").is_file() and (path / "objects").is_dir() and (path / "refs").is_dir()
+    except OSError:
+        return False
+
+
+def _inside_git_dir(path: Path, root: Path) -> bool:
+    cur = path if path.is_dir() else path.parent
+    while True:
+        if _is_git_dir(cur):
+            return True
+        if cur == root or cur == cur.parent:
+            return False
+        cur = cur.parent
 
 
 def is_secret_file(path: Path) -> bool:
@@ -218,12 +262,76 @@ def is_secret_file(path: Path) -> bool:
     return any(fnmatch.fnmatch(name, pat) for pat in SECRET_FILE_PATTERNS)
 
 
+_KEY_BEGIN = re.compile(r"-----BEGIN [A-Z ]{0,40}PRIVATE KEY(?: BLOCK)?-----")
+_KEY_END = re.compile(r"-----END [A-Z ]{0,40}PRIVATE KEY(?: BLOCK)?-----")
+
+
+def _redact_private_keys(text: str) -> Tuple[str, int]:
+    """Linear-time private key redaction (PEM and PGP); an unterminated block is redacted to the end."""
+    out: List[str] = []
+    pos, count = 0, 0
+    while True:
+        m = _KEY_BEGIN.search(text, pos)
+        if not m:
+            break
+        end = _KEY_END.search(text, m.end(), min(len(text), m.end() + 65_536))
+        stop = end.end() if end else min(len(text), m.end() + 65_536)
+        out.append(text[pos:m.start()])
+        out.append("[REDACTED:private-key]")
+        count += 1
+        pos = stop
+    out.append(text[pos:])
+    return "".join(out), count
+
+
 def redact_secrets(text: str) -> Tuple[str, int]:
-    count = 0
+    text, count = _redact_private_keys(text)
     for label, pattern in SECRET_CONTENT_PATTERNS:
-        text, n = pattern.subn(f"[REDACTED:{label}]", text)
+        if label == "secret-assignment" and pattern.groups == 3:  # quoted literal: keep the quotes
+            text, n = pattern.subn(lambda m: m.group(1) + m.group(2) + f"[REDACTED:{label}]" + m.group(2), text)
+        elif label in ("aws-secret-key", "secret-assignment"):
+            text, n = pattern.subn(lambda m: m.group(1) + f"[REDACTED:{label}]", text)
+        else:
+            text, n = pattern.subn(f"[REDACTED:{label}]", text)
         count += n
     return text, count
+
+
+# The repository being analysed is untrusted, and so is its .git/config: a repo delivered as an
+# archive, or an embedded bare repo, can configure git to run commands (fsmonitor, hooks, external
+# diff, textconv, filters, pager). Every git call disables those mechanisms explicitly.
+_GIT_SAFE_CONFIG = [
+    "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "diff.external=",
+    "-c", "core.pager=cat", "-c", "safe.bareRepository=explicit", "-c", "core.untrackedCache=false",
+    "-c", "protocol.allow=never", "-c", "core.sshCommand=false",
+]
+_GIT_FILTER_KEY = re.compile(r"^filter\.(.+)\.(?:clean|smudge|process)$", re.I)
+
+
+def _git_env() -> Dict[str, str]:
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}  # no GIT_DIR/GIT_EXTERNAL_DIFF/...
+    env["GIT_LITERAL_PATHSPECS"] = "1"  # `*` or `:(exclude)` in file names are never patterns
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return env
+
+
+def _git_filter_overrides(git: str, root: Path) -> List[str]:
+    """Neutralise any clean/smudge/process filter drivers the repo (or user config) defines."""
+    try:
+        proc = subprocess.run([git, *_GIT_SAFE_CONFIG, "-C", str(root), "config", "--list", "--name-only"],
+                              capture_output=True, text=True, timeout=10, check=False, env=_git_env())
+    except (OSError, subprocess.SubprocessError):
+        return []
+    names = set()
+    for key in proc.stdout.splitlines():
+        m = _GIT_FILTER_KEY.match(key.strip())
+        if m:
+            names.add(m.group(1))
+    out: List[str] = []
+    for name in sorted(names):
+        out += ["-c", f"filter.{name}.process=", "-c", f"filter.{name}.clean=cat",
+                "-c", f"filter.{name}.smudge=cat", "-c", f"filter.{name}.required=false"]
+    return out
 
 
 def _git(root: Path, *args: str, timeout: int = 30) -> Optional[str]:
@@ -231,12 +339,9 @@ def _git(root: Path, *args: str, timeout: int = 30) -> Optional[str]:
     if not git:
         return None
     try:
-        proc = subprocess.run(
-            [git, "-C", str(root), *args],
-            capture_output=True, text=True, timeout=timeout, check=False,
-            # File names are passed as pathspecs; never let `*` or `:(exclude)` act as patterns.
-            env={**os.environ, "GIT_LITERAL_PATHSPECS": "1"},
-        )
+        cmd = [git, *_GIT_SAFE_CONFIG, *_git_filter_overrides(git, root), "-C", str(root), *args]
+        proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=timeout,
+                              check=False, env=_git_env())
     except (OSError, subprocess.SubprocessError):
         return None
     return proc.stdout if proc.returncode == 0 else None
@@ -268,6 +373,27 @@ def _expand_dir(directory: Path, root: Path, use_git: bool) -> List[Path]:
             if not name.startswith("."):
                 files.append(Path(cur) / name)
     return files
+
+
+def _git_ignored(root: Path, rels: List[str]) -> set:
+    """Subset of `rels` that git ignores. Ignored files often hold local secrets, so they are skipped
+    even when named explicitly, unless GEMINI4_INCLUDE_IGNORED=1."""
+    if not rels or _env("GEMINI4_INCLUDE_IGNORED") == "1" or not _in_git_repo(root):
+        return set()
+    git = shutil.which("git")
+    if not git:
+        return set()
+    env = _git_env()
+    env.pop("GIT_LITERAL_PATHSPECS", None)  # check-ignore rejects it; names arrive on stdin, not as pathspecs
+    try:
+        proc = subprocess.run([git, *_GIT_SAFE_CONFIG, "-C", str(root), "check-ignore", "-z", "--stdin"],
+                              input="\0".join(rels) + "\0", capture_output=True, text=True, timeout=30,
+                              check=False, env=env)
+    except (OSError, subprocess.SubprocessError):
+        return set(rels)  # fail closed: if we cannot tell, treat the files as ignored
+    if proc.returncode not in (0, 1):  # 0 = some ignored, 1 = none ignored
+        return set(rels)
+    return {r for r in proc.stdout.split("\0") if r}
 
 
 def _looks_binary(path: Path) -> bool:
@@ -335,7 +461,14 @@ def collect_files(
     seen = set()
     chunks: List[str] = []
     included: List[str] = []
-    skipped = {"secret_file": [], "binary": 0, "too_large": 0, "filtered": 0, "over_budget": 0}
+    skipped = {"secret_file": [], "ignored": [], "binary": 0, "too_large": 0, "filtered": 0, "over_budget": 0}
+    rel_of = {}
+    for c in candidates:
+        try:
+            rel_of[c] = os.path.relpath(c.resolve(), root)
+        except (OSError, ValueError):
+            pass
+    ignored = _git_ignored(root, sorted({r for r in rel_of.values() if not r.startswith("..")}))
     total_chars = 0
     redactions = 0
     truncated = False
@@ -355,8 +488,11 @@ def collect_files(
                 continue
         except OSError:
             continue
-        if is_secret_file(Path(rel)) or is_secret_file(real):
+        if is_secret_file(Path(rel)) or is_secret_file(real) or _inside_git_dir(real, root):
             skipped["secret_file"].append(rel)
+            continue
+        if rel in ignored:
+            skipped["ignored"].append(rel)
             continue
         if include_globs and not any(
             fnmatch.fnmatch(rel, g) or fnmatch.fnmatch(real.name, g) for g in include_globs
@@ -431,8 +567,10 @@ def load_media(paths: List[str], root: Path, allowed: Tuple[str, ...]) -> Tuple[
         if not _is_within(real, root) or not real.is_file():
             raise ToolError(f"Media file `{raw}` not found inside the workspace.")
         rel = os.path.relpath(real, root)
-        if is_secret_file(Path(rel)):
+        if is_secret_file(Path(rel)) or _inside_git_dir(real, root):
             raise ToolError(f"`{raw}` looks like a secret file and will not be sent.")
+        if _git_ignored(root, [rel]):
+            raise ToolError(f"`{raw}` is gitignored and will not be sent (set GEMINI4_INCLUDE_IGNORED=1 to allow).")
         mime = MEDIA_TYPES.get(real.suffix.lower())
         if not mime or not mime.startswith(allowed):
             kinds = ", ".join(sorted(ext for ext, m in MEDIA_TYPES.items() if m.startswith(allowed)))
@@ -532,6 +670,8 @@ def describe_scope(meta: Dict[str, Any]) -> str:
     sk = meta["skipped"]
     if sk["secret_file"]:
         parts.append(f"excluded secret files: {', '.join(sk['secret_file'][:8])}")
+    if sk.get("ignored"):
+        parts.append(f"skipped gitignored files: {', '.join(sk['ignored'][:8])} (set GEMINI4_INCLUDE_IGNORED=1 to allow)")
     if meta["redactions"]:
         parts.append(f"{meta['redactions']} secret-like strings redacted")
     if meta["truncated"]:
@@ -630,7 +770,8 @@ def estimate_cost(model: str, usage: Dict[str, int]) -> Optional[float]:
         return None
     p_in, p_cached, p_out = price
     cached = usage.get("cachedContentTokenCount", 0)
-    fresh = max(0, usage.get("promptTokenCount", 0) - cached)
+    # toolUsePromptTokenCount: pages read by URL context and search results, billed as input
+    fresh = max(0, usage.get("promptTokenCount", 0) + usage.get("toolUsePromptTokenCount", 0) - cached)
     out = usage.get("candidatesTokenCount", 0) + usage.get("thoughtsTokenCount", 0)
     return (fresh * p_in + cached * p_cached + out * p_out) / 1_000_000
 
@@ -638,7 +779,7 @@ def estimate_cost(model: str, usage: Dict[str, int]) -> Optional[float]:
 def _record_usage(model: str, usage: Dict[str, int]) -> None:
     row = USAGE.setdefault(model, {"calls": 0, "prompt": 0, "cached": 0, "output": 0, "thoughts": 0})
     row["calls"] += 1
-    row["prompt"] += int(usage.get("promptTokenCount", 0))
+    row["prompt"] += int(usage.get("promptTokenCount", 0)) + int(usage.get("toolUsePromptTokenCount", 0))
     row["cached"] += int(usage.get("cachedContentTokenCount", 0))
     row["output"] += int(usage.get("candidatesTokenCount", 0))
     row["thoughts"] += int(usage.get("thoughtsTokenCount", 0))
@@ -676,6 +817,7 @@ def call_gemini(
     gen_cfg: Dict[str, Any] = {"maxOutputTokens": max_output_tokens}
     if "flash-lite" not in model:
         gen_cfg["thinkingConfig"] = {"thinkingLevel": thinking_level.upper()}
+    prompt = redact_secrets(prompt)[0]  # includes questions, focus and specs typed by the user or agent
     request: Dict[str, Any] = {
         "systemInstruction": {"parts": [{"text": system}]},
         "contents": [{"role": "user", "parts": list(media_parts or []) + [{"text": prompt}]}],
@@ -784,7 +926,7 @@ def usage_footer(res: Dict[str, Any], scope: Optional[str] = None) -> str:
     bits = [
         f"model `{res['model']}` via {res['backend']}",
         f"{res['latency_s']}s",
-        f"input {u.get('promptTokenCount', 0):,} tok"
+        f"input {u.get('promptTokenCount', 0) + u.get('toolUsePromptTokenCount', 0):,} tok"
         + (f" ({u['cachedContentTokenCount']:,} cached)" if u.get("cachedContentTokenCount") else ""),
         f"output {u.get('candidatesTokenCount', 0) + u.get('thoughtsTokenCount', 0):,} tok",
     ]
@@ -961,11 +1103,15 @@ def stage_generated_files(text: str, root: Path, truncated: bool) -> Tuple[Path,
             refused.append(rel)
             continue
         dest = stage_root / rel_path
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        if not _is_within(dest.resolve(), stage_root) or dest.is_symlink():
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if not _is_within(dest.resolve(), stage_root) or dest.is_symlink() or dest.is_dir():
+                refused.append(rel)
+                continue
+            dest.write_text(match.group(2) + "\n", encoding="utf-8")
+        except OSError:
             refused.append(rel)
             continue
-        dest.write_text(match.group(2) + "\n", encoding="utf-8")
         written.append(rel)
     if truncated:
         # The last block may be cut off mid-file; an unterminated block is never matched above.
@@ -978,8 +1124,9 @@ def stage_generated_files(text: str, root: Path, truncated: bool) -> Tuple[Path,
 
 LOG_EVIDENCE_RE = re.compile(
     r"(FAIL|ERROR|Error|Exception|Traceback|panic:|fatal|Assertion|assert|not ok|[✗✕×]|"
-    r"^\s*E\s{2,}|\bat \S+\(?\S*:\d+|\S+\.(?:py|js|ts|tsx|jsx|go|rs|java|kt|rb|cs|cpp|c|h|php|swift):\d+)"
+    r"^\s*E\s{2,}|\.(?:py|js|ts|tsx|jsx|go|rs|java|kt|rb|cs|cpp|c|h|php|swift)[\"']?[:,(]\s*(?:line )?\d+)"
 )
+LOG_SCAN_CHARS = 2_000  # only the start of each line is scanned, so very long lines stay cheap
 MAX_LOG_BYTES = 50_000_000
 
 
@@ -1011,7 +1158,7 @@ def read_log_digest(log_rel: str, root: Path, budget: int) -> Tuple[str, str]:
         return f"<file path={json.dumps(log_rel)}>\n{body}\n</file>", f"log `{log_rel}`: all {n:,} lines{head_note}"
     keep = set()
     for i, line in enumerate(lines):
-        if LOG_EVIDENCE_RE.search(line):
+        if LOG_EVIDENCE_RE.search(line[:LOG_SCAN_CHARS]):
             keep.update(range(max(0, i - 2), min(n, i + 3)))
     tail_budget = budget // 3
     used, j = 0, n - 1
@@ -1040,6 +1187,16 @@ def read_log_digest(log_rel: str, root: Path, budget: int) -> Tuple[str, str]:
     desc = (f"log `{log_rel}`: kept {len(ordered):,} of {n:,} lines (failure evidence and the tail), "
             f"{dropped_ranges} ranges omitted{head_note}")
     return f"<file path={json.dumps(log_rel)}>\n" + "\n".join(out) + "\n</file>", desc
+
+
+_SENSITIVE_TARGETS = (".github/", ".gitlab-ci", ".circleci/", ".claude/", ".cursor/", ".codex/", ".husky/",
+                      ".vscode/", ".devcontainer/", ".gitattributes", ".gitmodules", ".pre-commit-config",
+                      "Makefile", "Dockerfile", "package.json", "setup.py", "pyproject.toml", "AGENTS.md", "CLAUDE.md")
+
+
+def _is_sensitive_target(rel: str) -> bool:
+    norm = rel.replace("\\", "/")
+    return any(norm.startswith(t) or f"/{t}" in f"/{norm}" for t in _SENSITIVE_TARGETS)
 
 
 def file_change_summary(root: Path, stage_root: Path, rel: str) -> str:
@@ -1087,7 +1244,9 @@ def _agy_env() -> Dict[str, str]:
         upper = key.upper()
         if upper in ("PWD", "OLDPWD", "CLAUDE_PROJECT_DIR") or upper.startswith("GEMINI4_"):
             continue
-        if upper not in _AGY_ENV_KEEP and any(w in upper for w in ("TOKEN", "SECRET", "PASSWORD", "KEY", "CREDENTIAL")):
+        if upper not in _AGY_ENV_KEEP and any(w in upper for w in (
+                "TOKEN", "SECRET", "PASSWORD", "PASSWD", "KEY", "CREDENTIAL", "AUTH", "PAT", "DATABASE", "DSN",
+                "_URL", "URI", "COOKIE", "SESSION")):
             continue
         env[key] = val
     return env
@@ -1480,8 +1639,11 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
             raise ToolError(f"Invalid git ref: {base!r}")
         # --relative: only changes under the workspace root; --no-renames: a renamed secret file
         # shows up under its old name too, so the secret filter sees it.
-        diff_args = (["diff", "--relative", "--no-renames", "--cached"] if args.get("staged_only")
-                     else ["diff", "--relative", "--no-renames", base])
+        # --no-ext-diff/--no-textconv: never run repo-configured diff programs; --text: a .gitattributes
+        # "-diff" or "binary" entry must not hide a change from the review.
+        diff_args = (["diff", "--relative", "--no-renames", "--no-ext-diff", "--no-textconv", "--text", "--cached"]
+                     if args.get("staged_only") else
+                     ["diff", "--relative", "--no-renames", "--no-ext-diff", "--no-textconv", "--text", base])
         names_out = _git(root, *diff_args, "--name-only", "-z")
         if names_out is None:
             raise ToolError(f"`git diff {base}` failed. Check that the ref exists.")
@@ -1491,8 +1653,15 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
         allowed = [n for n in changed
                    if not is_secret_file(Path(n)) and Path(n).name.lower() not in SECRET_FILE_ALLOW]
         excluded = sorted(set(changed) - set(allowed))
+        # Real binaries are listed by name, not diffed. Everything else is diffed with --text, so a
+        # .gitattributes "-diff"/"binary" entry on a text file cannot hide a change from the review.
+        binary_changed = [n for n in allowed if Path(n).suffix.lower() in BINARY_EXTENSIONS
+                          or ((root / n).is_file() and _looks_binary(root / n))]
+        allowed = [n for n in allowed if n not in binary_changed]
         if not allowed:
-            raise ToolError("No reviewable changes found." + (f" Excluded secret files: {excluded}" if excluded else ""))
+            raise ToolError("No reviewable text changes found."
+                            + (f" Excluded secret files: {excluded}." if excluded else "")
+                            + (f" Binary files changed (not reviewed): {binary_changed[:10]}." if binary_changed else ""))
         diff = _git(root, *diff_args, "--unified=5", "--", *allowed, timeout=60) or ""
         if len(diff) > MAX_CONTEXT_CHARS // 2:
             raise ToolError(
@@ -1517,6 +1686,8 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
         scope = f"{len(allowed)} changed files vs `{base}`"
         if excluded:
             scope += f"; excluded secret files: {', '.join(excluded)}"
+        if binary_changed:
+            scope += f"; binary files changed, not reviewed: {', '.join(binary_changed[:10])}"
         if redactions:
             scope += f"; {redactions} secret-like strings redacted from diff"
         return _clip(res["text"]) + usage_footer(res, scope)
@@ -1542,6 +1713,10 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
             )
         rel_stage = os.path.relpath(stage_root, root)
         lines = [f"Staged {len(written)} files in `{rel_stage}/` (working tree unchanged):", ""]
+        sensitive = [r for r in written if _is_sensitive_target(r)]
+        if sensitive:
+            lines += ["WARNING: these staged files control CI, hooks, agents or tooling. Review them line by line "
+                      "before applying: " + ", ".join(f"`{r}`" for r in sensitive), ""]
         for rel in written:
             lines.append(f"- `{rel}` ({file_change_summary(root, stage_root, rel)})")
         if refused:
@@ -1612,6 +1787,8 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
             parsed = urllib.parse.urlparse(spec)
             if not parsed.hostname:
                 raise ToolError(f"Invalid spec URL: {spec!r}")
+            if parsed.username or parsed.password:
+                raise ToolError("Spec URLs with credentials are not allowed; the URL is sent to Google.")
             tools = [{"urlContext": {}}]
             spec_label = spec
             spec_text = f"The specification is at this URL; read it with the URL context tool: {spec}"
@@ -1689,6 +1866,8 @@ def read_message(stream: BinaryIO) -> Optional[Any]:
             break
     if stripped.lower().startswith(b"content-length:"):
         length = int(stripped.split(b":", 1)[1].strip())
+        if length < 0 or length > 64_000_000:
+            raise ValueError(f"invalid Content-Length {length}")
         while True:
             hdr = stream.readline()
             if not hdr or hdr in (b"\r\n", b"\n"):
@@ -1706,6 +1885,8 @@ def handle_request(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     method = msg.get("method", "")
     req_id = msg.get("id")
     params = msg.get("params") or {}
+    if not isinstance(params, dict):
+        params = {}
     if req_id is None:  # notification
         return None
 
@@ -1755,21 +1936,24 @@ def main() -> None:
     while True:
         try:
             msg = read_message(sys.stdin.buffer)
-        except (ValueError, json.JSONDecodeError) as exc:
-            sys.stderr.write(f"[gemini4-mcp] bad message: {exc}\n")
+        except (ValueError, json.JSONDecodeError, RecursionError) as exc:
+            sys.stderr.write(f"[gemini4-mcp] bad message: {type(exc).__name__}\n")
             continue
         except KeyboardInterrupt:
             break
         if msg is None:
             break
-        if isinstance(msg, list):
-            replies = [r for r in (handle_request(m) for m in msg if isinstance(m, dict)) if r is not None]
-            if replies:
-                write_message(replies)
-        elif isinstance(msg, dict):
-            reply = handle_request(msg)
-            if reply is not None:
-                write_message(reply)
+        try:
+            if isinstance(msg, list):
+                replies = [r for r in (handle_request(m) for m in msg if isinstance(m, dict)) if r is not None]
+                if replies:
+                    write_message(replies)
+            elif isinstance(msg, dict):
+                reply = handle_request(msg)
+                if reply is not None:
+                    write_message(reply)
+        except Exception as exc:  # one bad message must never take the server down
+            sys.stderr.write(f"[gemini4-mcp] request failed: {type(exc).__name__}\n")
 
 
 if __name__ == "__main__":

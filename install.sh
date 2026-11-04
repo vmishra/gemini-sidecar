@@ -55,14 +55,23 @@ run() {
   fi
 }
 
+# Refuse to write through symlinks: a symlinked target in an untrusted project could redirect the
+# write to another file (for example the user's global Claude Code settings).
+refuse_symlink() {
+  local p
+  for p in "$@"; do
+    if [[ -L "$p" ]]; then echo "Refusing to write through a symlink: $p" >&2; exit 1; fi
+  done
+}
+
 backup() {
   local f="$1"
-  if [[ -e "$f" ]]; then run cp -p "$f" "${f}.bak.${STAMP}"; fi
+  if [[ -e "$f" || -L "$f" ]]; then run cp -pP "$f" "${f}.bak.${STAMP}"; fi
 }
 
 # --------------------------------------------------------------------------- doctor
 doctor() {
-  python3 - "$KIT_DIR" "$DOCTOR_JSON" <<'PY'
+  python3 -I - "$KIT_DIR" "$DOCTOR_JSON" <<'PY'
 import json, os, shutil, socket, stat, subprocess, sys
 from pathlib import Path
 
@@ -151,14 +160,27 @@ install_claude() {
 install_codex() {
   echo "Codex CLI MCP server"
   local cfg="${CODEX_HOME:-$HOME/.codex}/config.toml"
-  if [[ -f "$cfg" ]] && grep -q '^\[mcp_servers\.gemini4\]' "$cfg"; then
+  refuse_symlink "$cfg"
+  if [[ -f "$cfg" ]] && python3 -I - "$cfg" <<'PY'
+import re, sys
+text = open(sys.argv[1], encoding="utf-8").read()
+try:
+    import tomllib
+    found = "gemini4" in (tomllib.loads(text).get("mcp_servers") or {})
+except ImportError:  # Python < 3.11: fall back to the common spellings
+    found = bool(re.search(r'^\s*\[mcp_servers\.(?:gemini4|"gemini4")\]|^\s*gemini4\s*=\s*\{', text, re.M))
+except Exception:
+    found = True  # unparsable config: don't append to it
+sys.exit(0 if found else 1)
+PY
+  then
     echo "   [mcp_servers.gemini4] already present in $cfg; leaving it unchanged."
     return
   fi
   run mkdir -p "$(dirname "$cfg")"
   backup "$cfg"
   if [[ $DRY_RUN -eq 1 ]]; then echo "   [dry-run] append [mcp_servers.gemini4] to $cfg"; return; fi
-  python3 - "$cfg" "$MCP_SERVER" "${KIT_DIR}/codex/config.toml.example" <<'PY'
+  python3 -I - "$cfg" "$MCP_SERVER" "${KIT_DIR}/codex/config.toml.example" <<'PY'
 import json, sys
 cfg, server, example = sys.argv[1:4]
 block = open(example, encoding="utf-8").read()
@@ -175,12 +197,13 @@ PY
 install_cursor() {
   echo "Cursor MCP server and subagents"
   local dir="$HOME/.cursor" cfg="$HOME/.cursor/mcp.json"
+  refuse_symlink "$cfg"
   run mkdir -p "$dir/agents"
   backup "$cfg"
   if [[ $DRY_RUN -eq 1 ]]; then
     echo "   [dry-run] merge gemini4 into $cfg"
   else
-    python3 - "$cfg" "$MCP_SERVER" "${KIT_DIR}/cursor/mcp.json" <<'PY'
+    python3 -I - "$cfg" "$MCP_SERVER" "${KIT_DIR}/cursor/mcp.json" <<'PY'
 import json, os, sys
 cfg, server, template = sys.argv[1:4]
 data = {}
@@ -216,13 +239,14 @@ install_profile() {
   if [[ ! -d "$PROJECT_DIR" ]]; then echo "Project directory not found: $PROJECT_DIR" >&2; exit 2; fi
   local dest="${PROJECT_DIR}/.claude/settings.local.json"
   echo "Claude Code gateway profile ($PROFILE)"
+  refuse_symlink "${PROJECT_DIR}/.claude" "$dest"
   run mkdir -p "${PROJECT_DIR}/.claude"
   backup "$dest"
   if [[ $DRY_RUN -eq 1 ]]; then
     echo "   [dry-run] merge $(basename "$src") into $dest"
   else
     # Merge rather than replace, so existing permissions and other settings are kept.
-    python3 - "$src" "$dest" <<'PY'
+    python3 -I - "$src" "$dest" <<'PY'
 import json, os, sys
 src, dest = sys.argv[1:3]
 profile = json.load(open(src, encoding="utf-8"))
@@ -232,11 +256,14 @@ if os.path.exists(dest):
     current = json.loads(text) if text else {}
 env = {**current.get("env", {}), **profile.get("env", {})}
 merged = {**current, **profile, "env": env}
-with open(dest, "w", encoding="utf-8") as fh:
+tmp = dest + ".tmp"
+with open(tmp, "w", encoding="utf-8") as fh:
     json.dump(merged, fh, indent=2)
     fh.write("\n")
+os.replace(tmp, dest)  # atomic, and replaces the path itself rather than a symlink target
 PY
     echo "   Merged profile into $dest"
+    echo "   Note: this sets model, apiKeyHelper and env keys for this project, replacing any you had there."
   fi
   echo "   Start the gateway before launching claude: python3 \"${KIT_DIR}/router/gemini4_gateway.py\""
   if [[ "$PROFILE" == "hybrid" ]]; then

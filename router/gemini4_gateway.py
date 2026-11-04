@@ -52,6 +52,7 @@ import collections
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import secrets
@@ -68,7 +69,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-VERSION = "2.0.0"
+VERSION = "2.3.0"
 GATEWAY_PORT = int(os.environ.get("GEMINI4_GATEWAY_PORT", "3456"))
 
 MAX_BODY_BYTES = 32 * 1024 * 1024
@@ -242,18 +243,34 @@ def load_or_create_token() -> Tuple[str, Optional[str], bool]:
     """Return (token, file_path_or_None, created). The token itself is never printed."""
     env_token = (os.environ.get("GEMINI4_GATEWAY_TOKEN") or "").strip()
     if env_token:
+        if len(env_token) < MIN_TOKEN_LENGTH:
+            raise RuntimeError(f"GEMINI4_GATEWAY_TOKEN must be at least {MIN_TOKEN_LENGTH} characters.")
         return env_token, None, False
     path = token_file_path()
     for _ in range(2):
         try:
-            with open(path, "r", encoding="utf-8") as fh:
-                token = fh.read().strip()
-            if not token:
-                raise RuntimeError(f"Gateway token file {path} is empty; delete it to regenerate.")
-            return token, path, False
+            # O_NOFOLLOW: a symlink planted at the token path is refused rather than followed.
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
         except FileNotFoundError:
-            pass
+            fd = None
+        except OSError as exc:
+            raise RuntimeError(f"Refusing to use gateway token file {path} ({exc.strerror}); delete it to regenerate.")
+        if fd is not None:
+            with os.fdopen(fd, "r", encoding="utf-8") as fh:
+                st = os.fstat(fh.fileno())
+                if hasattr(os, "getuid") and (st.st_uid != os.getuid() or st.st_mode & 0o077):
+                    raise RuntimeError(
+                        f"Gateway token file {path} must be owned by you with mode 0600 "
+                        f"(run: chmod 600 {path}).")
+                token = fh.read().strip()
+            if len(token) < MIN_TOKEN_LENGTH:
+                raise RuntimeError(f"Gateway token file {path} is empty or too short; delete it to regenerate.")
+            return token, path, False
         os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+        try:
+            os.chmod(os.path.dirname(path), 0o700)
+        except OSError:
+            pass
         token = secrets.token_urlsafe(32)
         try:
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -263,6 +280,9 @@ def load_or_create_token() -> Tuple[str, Optional[str], bool]:
             fh.write(token + "\n")
         return token, path, True
     raise RuntimeError(f"Could not read or create gateway token file {path}.")
+
+
+MIN_TOKEN_LENGTH = 32
 
 
 def token_matches(presented: str, expected: str) -> bool:
@@ -825,9 +845,12 @@ def _env_float(name: str) -> Optional[float]:
     if not raw:
         return None
     try:
-        return float(raw)
+        value = float(raw)
     except ValueError:
-        return None
+        value = float("nan")
+    if not math.isfinite(value) or value < 0:
+        raise RuntimeError(f"{name} must be a non-negative number, got {raw!r}.")
+    return value
 
 
 def estimate_reservation_usd(model: str, input_tokens: int, max_output_tokens: int) -> float:
@@ -1108,7 +1131,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
     server_version = "gemini4-gateway/" + VERSION
     sys_version = ""
     protocol_version = "HTTP/1.0"
-    timeout = 120
+    timeout = 10  # per socket read; a stalled client is dropped quickly instead of holding a slot
 
     def log_message(self, fmt: str, *args: Any) -> None:
         return  # Request lines can contain paths; structured logging is done via log_event.
@@ -1200,7 +1223,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             return None
         try:
             body = json.loads(raw.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
+        except (ValueError, UnicodeDecodeError, RecursionError):
             self._send_error(400, "invalid_request_error", "Request body is not valid JSON.")
             return None
         if not isinstance(body, dict):
@@ -1338,7 +1361,10 @@ class GatewayHandler(BaseHTTPRequestHandler):
             try:
                 gem_resp = call_gemini(url, headers, payload, timeout_s)
                 msg = gemini_response_to_anthropic(gem_resp, f"claude-{model}")
-                settle_budget(session_id, reservation, cost_from_gemini_usage(model, gem_resp.get("usageMetadata")))
+                usage_meta = gem_resp.get("usageMetadata")
+                # No usage reported: keep the reservation as the charge rather than recording $0.
+                settle_budget(session_id, reservation,
+                              cost_from_gemini_usage(model, usage_meta) if usage_meta else reservation)
                 usage = msg["usage"]
                 log_event("upstream", session=digest, model=model, rule=decision["rule_matched"], status=200,
                           input_tokens=usage["input_tokens"], cached_tokens=usage["cache_read_input_tokens"],
@@ -1370,6 +1396,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
             self._begin(200, "text/event-stream; charset=utf-8", extra)
             self.end_headers()
             self.close_connection = True
+            if not self._write(PING_FRAME):  # first keep-alive as soon as the stream opens
+                return
             while not done.wait(PING_INTERVAL_S):
                 if not self._write(PING_FRAME):
                     return
@@ -1397,7 +1425,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
                                       "ANTHROPIC_UPSTREAM_KEY is not set; cannot forward to api.anthropic.com.")
         # The body is forwarded unchanged, so budget against the model actually requested upstream.
         model = normalize_model_id(str(body.get("model") or model))
-        allowed, reservation, message = reserve_budget(session_id, model, est_input, resolve_max_output_tokens(body))
+        # The body is forwarded unchanged, so reserve against the client's real max_tokens.
+        real_max = body.get("max_tokens") if isinstance(body.get("max_tokens"), int) else resolve_max_output_tokens(body)
+        allowed, reservation, message = reserve_budget(session_id, model, est_input, max(1, real_max))
         if not allowed:
             raise GatewayRequestError(403, "permission_error", message)
         headers = {
@@ -1415,7 +1445,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
         except urllib.error.HTTPError as err:
             settle_budget(session_id, reservation, None)
             log_event("upstream", session=digest, model=model, rule=decision["rule_matched"], status=err.code)
-            if err.code in (429, 529) and gemini_credentials_available():
+            # Failover sends the whole conversation to Google, so it only happens when explicitly enabled.
+            if (err.code in (429, 529) and gemini_credentials_available()
+                    and (os.environ.get("GEMINI4_FAILOVER_TO_GEMINI") or "").strip() == "1"):
                 err.close()
                 target = "gemini-4-argon"
                 pin_failover(session_id, f"gemini/{target}", len(body.get("messages") or []))
@@ -1455,10 +1487,11 @@ class GatewayHandler(BaseHTTPRequestHandler):
         resp_headers = resp.headers
         extra = self._decision_header(decision)
         for name in _RELAYED_RESPONSE_HEADERS:
-            if resp_headers.get(name):
-                extra[name] = resp_headers.get(name)
+            value = resp_headers.get(name)
+            if value and "\r" not in value and "\n" not in value:
+                extra[name] = value
         for name, value in resp_headers.items():
-            if name.lower().startswith("anthropic-ratelimit-"):
+            if name.lower().startswith("anthropic-ratelimit-") and "\r" not in value and "\n" not in value:
                 extra[name] = value
         self._begin(status, resp_headers.get("Content-Type") or "application/json", extra)
         length = resp_headers.get("Content-Length")
@@ -1477,9 +1510,33 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 break
 
 
+MAX_CONNECTIONS = 64
+
+
 class ReusableGatewayHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
+    _slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        # Cap concurrent connections so idle or slow clients cannot exhaust threads or file handles.
+        if not self._slots.acquire(blocking=False):
+            try:
+                request.close()
+            except OSError:
+                pass
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
 
     def __init__(self, server_address: Tuple[str, int], handler_class: Any, token: Optional[str] = None) -> None:
         super().__init__(server_address, handler_class)

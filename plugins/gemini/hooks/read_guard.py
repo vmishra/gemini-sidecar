@@ -51,9 +51,9 @@ def main() -> int:
         return 0
     if not exceeds(path, threshold):
         return 0
-    name = os.path.basename(path)
+    # The file name is deliberately not echoed: names are attacker-controlled in an untrusted repo.
     advice = (
-        f"{name} has more than {threshold:,} lines. To answer a question about it, use gemini4_analyze_codebase "
+        f"This file has more than {threshold:,} lines. To answer a question about it, use gemini4_analyze_codebase "
         "(or /gemini:analyze): it reads the file outside this conversation and returns only the answer. "
         "Reading the whole file in chunks costs the same as one full read, so don't. To edit, find the spot "
         "first (for example with Grep) and read only those lines with offset and limit."

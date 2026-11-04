@@ -29,6 +29,8 @@
 | `GEMINI4_REQUEST_TIMEOUT` | Seconds per Gemini call (default 900) |
 | `GEMINI4_MAX_MEDIA_BYTES` | Total size of images, video and PDFs per call (default 14 MB; inline requests are limited to about 20 MB after encoding) |
 | `GEMINI4_ENABLE_AGY_CLI=1` | Let `/gemini:ask-antigravity` use the Antigravity CLI |
+| `GEMINI4_INCLUDE_IGNORED=1` | Allow gitignored files that are named explicitly (skipped by default) |
+| `GEMINI4_FAILOVER_TO_GEMINI=1` | Gateway, Hybrid: on an Anthropic 429/529, move the session to `gemini-4-argon` (sends the conversation to Google). Off by default. |
 | `GEMINI_SIDECAR_READ_GUARD` | `off` (default), `suggest` or `block`: see [Large-read guard](#large-read-guard) |
 | `GEMINI_SIDECAR_READ_GUARD_LINES` | Line threshold for the guard (default 400) |
 | `GEMINI4_PRICES_JSON` | Price overrides, e.g. `{"gemini-4-argon": [4.0, 0.2, 20.0]}` |
@@ -58,7 +60,7 @@ Reads with `offset` or `limit` always pass, because edits need exact lines. Imag
 
 | Symptom | Fix |
 |---|---|
-| `/gemini:status` says the backend is not configured | Set credentials (see [Try it](../README.md#try-it-in-two-minutes)) and restart. The server reads its environment at startup. |
+| `/gemini:status` says the backend is not configured | Set credentials (see [Try it](../README.md#install)) and restart. The server reads its environment at startup. |
 | `CERTIFICATE_VERIFY_FAILED` | python.org builds of Python on macOS ship without CA certificates. The server falls back to `/etc/ssl/cert.pem`; you can also run `Install Certificates.command`. |
 | Claude Code ignores the gateway | `CLAUDE_CODE_USE_VERTEX` or `CLAUDE_CODE_USE_BEDROCK` is set globally. The profiles override both; check your own settings files. |
 | Gateway returns 401 | The token doesn't match. The profiles read `~/.config/gemini4/gateway-token`. If you set `GEMINI4_GATEWAY_TOKEN`, use the same value for Claude Code. |

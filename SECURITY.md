@@ -21,6 +21,20 @@ Include what you found, how to reproduce it, and the impact you expect. We aim t
 - How Google or Anthropic handle data you send to their APIs; see their terms
 - Issues that need an attacker who already controls your shell environment or user account
 
+## Design
+
+| Area | Protection |
+|---|---|
+| File access | Workspace confinement (no absolute paths outside, `..`, or escaping symlinks); home and `/` refused as roots; gitignored files skipped even when named; secret file names and credential folders (`.ssh`, `.aws`, `.kube`, `.docker`, `.git`, bare repos) never read |
+| Data sent | Common token formats, private keys, JWTs, URL passwords and secret-named literals redacted from file contents, diffs, logs and typed prompts; media (images, video, PDF) is sent as-is |
+| Untrusted repositories | git runs with hooks, fsmonitor, external diff, textconv, filters and pager disabled, embedded bare repositories refused, and diffs forced to text |
+| Writes | Only under `.gemini4-staging/<run>/`; `.git` paths, symlinked staging, secret names and `..` refused; CI, hook and agent-config targets flagged |
+| Gateway | Loopback only; 32+ character token in a `0600` file (no symlinks); `Origin`/`Host` checks against browsers and DNS rebinding; size and connection caps; model allow-list; no prompt logging; failover to Google off by default |
+| Installer | No `eval`; isolated Python (`-I`); backups before changes; refuses to write through symlinks |
+| Supply chain | Standard library only; CI actions and container pinned by digest; Dependabot for actions |
+
+Known limits: redaction covers well-known formats, not every secret; media can't be redacted; the gateway forwards whole conversations to Google unfiltered; a local user on the same machine can interrupt the gateway's availability (but can't use it without the token).
+
 ## Supported versions
 
 Only the latest release receives security fixes.

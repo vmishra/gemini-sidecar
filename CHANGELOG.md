@@ -1,5 +1,34 @@
 # Changelog
 
+## 2.3.0 (2026-11-04)
+
+Hardening from a pre-release adversarial security review.
+
+### Security
+- git runs with repository-controlled command execution disabled: hooks, fsmonitor, external diff, textconv, filter drivers, pager and embedded bare repositories. Previously, a malicious repository delivered with its `.git` folder could make `/gemini:review` run a command.
+- Review diffs are forced to text, so `.gitattributes` can't hide a change.
+- Gitignored files are skipped even when named explicitly (`GEMINI4_INCLUDE_IGNORED=1` restores the old behaviour). Credential folders and bare repositories are never read.
+- Redaction now also covers AWS secret keys, GitLab, npm and Hugging Face tokens, Google client secrets and refresh tokens, Stripe test keys, PGP private keys, secret-named literals, and passwords containing `/` or `@` inside URLs. Typed questions and specs are redacted too.
+- Log and key scanning run in linear time, so very long lines can't stall the server.
+- The MCP server survives malformed messages.
+- Staged files that target CI, hooks or agent config are flagged. Write conflicts no longer abort a run.
+- Gateway:
+  - concurrent connections are capped, with a shorter idle timeout
+  - the token file is refused if it's a symlink, readable by others, or shorter than 32 characters
+  - non-finite budget values are refused, and missing usage is charged at the reservation
+  - Anthropic passthrough reserves budget against the real `max_tokens`
+  - relayed headers with line breaks are dropped
+  - deeply nested JSON gets a 400
+- Gateway failover to Google on an Anthropic 429/529 is now opt-in (`GEMINI4_FAILOVER_TO_GEMINI=1`).
+- Installer: Python runs isolated (`-I`), so a module planted in the current directory can't be imported. It refuses to write through symlinks, writes settings atomically, and detects an existing Codex entry in any TOML spelling.
+- The read guard no longer echoes file names, which are attacker-controlled. Skills scope `Read` to the project.
+- CI actions and the Python 3.9 container are pinned by digest, and Dependabot is enabled.
+
+### Changed
+- Cost reports include tokens from pages read by URL context.
+- The gateway sends its first SSE keep-alive as soon as the stream opens.
+- README: new security and privacy section, animated replays for five commands, and corrected claims.
+
 ## 2.2.1 (2026-11-04)
 
 ### Security

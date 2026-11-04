@@ -3,7 +3,7 @@ name: docs
 description: Write or refresh docstrings and documentation for the given code with Gemini, staged for review. Behaviour is not changed.
 argument-hint: "<paths...> [what to document]"
 disable-model-invocation: true
-allowed-tools: Read mcp__plugin_gemini_gemini4__gemini4_long_decode_refactor
+allowed-tools: Read(./**) mcp__plugin_gemini_gemini4__gemini4_long_decode_refactor
 ---
 
 # Generate documentation with Gemini

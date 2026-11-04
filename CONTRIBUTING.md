@@ -33,8 +33,8 @@ claude --plugin-dir ./plugins/gemini
 
 A command is a skill in `plugins/gemini/skills/<name>/SKILL.md`:
 
-1. Set `disable-model-invocation: true`, so code is only sent to Gemini when the user runs the command.
-2. List only the tools the command needs in `allowed-tools`. Use exact commands, not wildcards that could run arbitrary programs.
+1. Set `disable-model-invocation: true`, so the command never runs by itself. (The agent can still call the MCP tools directly, subject to the host's tool-permission prompts.)
+2. List only the tools the command needs in `allowed-tools`. Use exact commands, not wildcards that could run arbitrary programs, and scope `Read` to the project (`Read(./**)`).
 3. If the command needs new server behaviour, add a tool in `gemini4_mcp_server.py` with tests in `tests/test_mcp_server.py`.
 4. Add the command to the README table, with an example.
 

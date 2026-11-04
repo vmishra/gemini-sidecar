@@ -1,6 +1,6 @@
 {
   "name": "gemini",
-  "version": "2.2.1",
+  "version": "2.3.0",
   "description": "Offload codebase analysis, security audits, diff review, large refactors, test generation, test triage, dependency and CVE checks, spec compliance and screenshot debugging to Gemini through a local MCP server. Files are read from disk on the server side; only the answer returns to Claude Code.",
   "author": {
     "name": "Vikas Mishra"
