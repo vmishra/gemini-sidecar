@@ -548,6 +548,22 @@ class PreReleaseSecurityTests(Workspace):
         self.assertNotIn("\\xf3", sent)
         self.assertIn("binary files changed, not reviewed: logo.png", text)
 
+    def test_nul_byte_cannot_hide_a_text_change(self):
+        (self.root / "src" / "app.py").write_bytes(b"def add(a, b):\n    return backdoor()  \x00\n")
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "k"}), \
+             mock.patch.object(srv.urllib.request, "urlopen", return_value=gemini_reply("ok")) as op:
+            text = srv.execute_tool("gemini4_review_diff", {"base": "HEAD", "include_full_files": False})
+        self.assertIn("backdoor()", json.loads(op.call_args[0][0].data)["contents"][0]["parts"][0]["text"])
+        self.assertIn("NUL bytes", text)
+
+    def test_secret_assignment_regex_is_bounded(self):
+        import time as _t
+        start = _t.time()
+        for text in ("a_" * 100_000 + "password", ("password_token_secret_" * 20_000),
+                     "export " + "A" * 100_000 + "_TOKEN=" + "v" * 100_000):
+            srv.redact_secrets(text)
+        self.assertLess(_t.time() - start, 2.0)
+
     def test_gitignored_files_skipped_even_when_named(self):
         (self.root / "local_settings.py").write_text("DB = 'prod'\n")
         (self.root / ".gitignore").write_text("*.log\nlocal_settings.py\n")

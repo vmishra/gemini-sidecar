@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Dict, List, Optional, Tuple
 
 SERVER_NAME = "gemini4"
-SERVER_VERSION = "2.3.0"
+SERVER_VERSION = "2.3.1"
 DEFAULT_PROTOCOL_VERSION = "2025-06-18"
 
 _RPC_OUT: BinaryIO = sys.stdout.buffer
@@ -179,10 +179,11 @@ SECRET_CONTENT_PATTERNS: List[Tuple[str, "re.Pattern[str]"]] = [
     # Secret-named assignments, but only literal values: a quoted string, or a whole NAME=value line
     # (.env style). Code expressions such as `token = request.headers.get(...)` are left intact.
     ("secret-assignment", re.compile(
-        r"(?i)(?<![A-Za-z0-9_])((?:[A-Za-z0-9_]*_)?" + _SECRET_NAME + r"[A-Za-z0-9_]*[\"']?\s*[:=]\s*)"
+        r"(?i)(?<![A-Za-z0-9_])((?:[A-Za-z0-9_]{0,64}_)?" + _SECRET_NAME + r"[A-Za-z0-9_]{0,64}[\"']?[ \t]{0,16}[:=][ \t]{0,16})"
         r"([\"'])([^\"'\s]{6,})\2")),
     ("secret-assignment", re.compile(
-        r"(?im)^(\s*(?:export\s+)?[A-Za-z0-9_]*" + _SECRET_NAME + r"[A-Za-z0-9_]*\s*=\s*)([^\s\"'#()]{6,})\s*$")),
+        r"(?im)^([ \t]{0,32}(?:export[ \t]+)?[A-Za-z0-9_]{0,64}" + _SECRET_NAME + r"[A-Za-z0-9_]{0,64}[ \t]{0,16}=[ \t]{0,16})"
+        r"([^\s\"'#()]{6,512})[ \t]*$")),
 ]
 
 
@@ -1655,9 +1656,11 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
         excluded = sorted(set(changed) - set(allowed))
         # Real binaries are listed by name, not diffed. Everything else is diffed with --text, so a
         # .gitattributes "-diff"/"binary" entry on a text file cannot hide a change from the review.
-        binary_changed = [n for n in allowed if Path(n).suffix.lower() in BINARY_EXTENSIONS
-                          or ((root / n).is_file() and _looks_binary(root / n))]
+        # Only known binary formats are skipped. Any other file is reviewed as text even if it contains
+        # NUL bytes, so inserting a NUL cannot hide a change; such files are flagged in the scope line.
+        binary_changed = [n for n in allowed if Path(n).suffix.lower() in BINARY_EXTENSIONS]
         allowed = [n for n in allowed if n not in binary_changed]
+        nul_files = [n for n in allowed if (root / n).is_file() and _looks_binary(root / n)]
         if not allowed:
             raise ToolError("No reviewable text changes found."
                             + (f" Excluded secret files: {excluded}." if excluded else "")
@@ -1688,6 +1691,8 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
             scope += f"; excluded secret files: {', '.join(excluded)}"
         if binary_changed:
             scope += f"; binary files changed, not reviewed: {', '.join(binary_changed[:10])}"
+        if nul_files:
+            scope += f"; WARNING: text files containing NUL bytes (reviewed as text, check them): {', '.join(nul_files[:10])}"
         if redactions:
             scope += f"; {redactions} secret-like strings redacted from diff"
         return _clip(res["text"]) + usage_footer(res, scope)

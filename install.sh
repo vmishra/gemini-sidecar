@@ -256,11 +256,18 @@ if os.path.exists(dest):
     current = json.loads(text) if text else {}
 env = {**current.get("env", {}), **profile.get("env", {})}
 merged = {**current, **profile, "env": env}
-tmp = dest + ".tmp"
-with open(tmp, "w", encoding="utf-8") as fh:
-    json.dump(merged, fh, indent=2)
-    fh.write("\n")
-os.replace(tmp, dest)  # atomic, and replaces the path itself rather than a symlink target
+import tempfile
+# Unpredictable temp name created exclusively in the target directory, so a planted file or
+# symlink at a guessable path can't be followed.
+fd, tmp = tempfile.mkstemp(prefix=".settings.", suffix=".tmp", dir=os.path.dirname(dest))
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(merged, fh, indent=2)
+        fh.write("\n")
+    os.replace(tmp, dest)  # atomic, and replaces the path itself rather than a symlink target
+except BaseException:
+    os.unlink(tmp)
+    raise
 PY
     echo "   Merged profile into $dest"
     echo "   Note: this sets model, apiKeyHelper and env keys for this project, replacing any you had there."

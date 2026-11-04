@@ -44,6 +44,14 @@ class InstallerSafetyTests(unittest.TestCase):
         self.assertEqual(json.loads(victim.read_text()), {"model": "mine"})
         self.assertFalse(list((self.proj / ".claude").glob("*.bak.*")))
 
+    def test_planted_tmp_symlink_is_not_followed(self):
+        victim = self.home / "victim.json"
+        victim.write_text("original")
+        (self.proj / ".claude").mkdir()
+        os.symlink(victim, self.proj / ".claude" / "settings.local.json.tmp")
+        self.assertEqual(self.run_install("--gateway-profile", "hybrid").returncode, 0)
+        self.assertEqual(victim.read_text(), "original")
+
     def test_existing_settings_are_merged_not_replaced(self):
         (self.proj / ".claude").mkdir()
         (self.proj / ".claude" / "settings.local.json").write_text('{"permissions": {"allow": ["Bash(npm test)"]}}')

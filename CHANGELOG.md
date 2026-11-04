@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.3.1 (2026-11-04)
+
+### Security
+- Review: only known binary formats are skipped. Any other file is reviewed as text, even if it contains NUL bytes, and is flagged, so inserting a NUL can't hide a change.
+- Secret-assignment redaction uses bounded patterns (no catastrophic backtracking on long identifiers).
+- Installer: settings are written through an unpredictable, exclusively created temp file, so a planted `.tmp` symlink can't redirect the write.
+
 ## 2.3.0 (2026-11-04)
 
 Hardening from a pre-release adversarial security review.
