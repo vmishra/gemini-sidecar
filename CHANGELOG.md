@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.3.5 (2026-11-05)
+
+### Fixed
+- Large repositories no longer go over Gemini's input limit. The context budget is counted in estimated tokens instead of characters (a flat chars/4 rule undercounted inline SVG, markup and data by up to 3x, so a whole-repository call could be rejected by the API). The estimator is fitted to `countTokens` results across code, markup, data and docs. The default budget is 750K estimated tokens.
+- When a scope does not fit, the important files are read first:
+  - source code comes first, then data and markup, then translation catalogs, lockfiles, changelogs, licenses, generated code (`zz_generated*`, `*.pb.go`, `*_pb2.py`) and SVG
+  - within each tier, sibling directories take turns, so a large folder cannot take the whole budget
+  - minified or very dense files, and any single file over 1/12 of the budget, are placed after everything else
+- Tracked `build/`, `dist/` and `vendor/` directories are read (at low priority) instead of skipped; some projects keep real source there. `node_modules` and similar dependency trees are still never read.
+- Audio, video, font, design and ML model files are recognised as binary without being opened.
+
+### Performance
+- A whole-repository call on a ~32K-file repository went from 41 s to under 3 s before the model call. Ignore rules are taken from git in one call instead of checking every path, files that cannot fit are skipped without being read, and collection stops once the budget is effectively full.
+- Globs are matched against git's file list instead of walking the disk, so `**/*.js` never traverses `node_modules`.
+- `/gemini:analyze` uses a 400K-token budget by default (`GEMINI4_ANALYZE_MAX_TOKENS`): questions need the relevant code, and input time grows with size.
+
+### Changed
+- A request over the model's token limit now returns an actionable message.
+- `/gemini:map` and `/gemini:security-audit` go ahead when the estimate shows files left out, instead of narrowing paths by hand.
+
 ## 2.3.4 (2026-11-04)
 
 ### Security

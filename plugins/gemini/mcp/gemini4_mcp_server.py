@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Dict, List, Optional, Tuple
 
 SERVER_NAME = "gemini4"
-SERVER_VERSION = "2.3.4"
+SERVER_VERSION = "2.3.5"
 DEFAULT_PROTOCOL_VERSION = "2025-06-18"
 
 _RPC_OUT: BinaryIO = sys.stdout.buffer
@@ -106,7 +106,13 @@ MODEL_SECURITY = normalize_model_id(MODEL_SECURITY_OVERRIDE) if MODEL_SECURITY_O
 
 TIERS = {"pro": MODEL_PRO, "argon": MODEL_PRO, "flash": MODEL_FLASH, "flash-lite": MODEL_LITE}
 
-MAX_CONTEXT_CHARS = _env_int("GEMINI4_MAX_CONTEXT_CHARS", 2_400_000)  # ~600K tokens
+MAX_CONTEXT_CHARS = _env_int("GEMINI4_MAX_CONTEXT_CHARS", 4_000_000)  # hard cap on raw size
+# Budget in estimated tokens (see estimate_tokens). The models accept 1,048,576 input tokens; the
+# margin covers estimator error on unusual text and the prompt around the files.
+MAX_CONTEXT_TOKENS = _env_int("GEMINI4_MAX_CONTEXT_TOKENS", 750_000)
+# Questions need the relevant code, not every file, and input time grows with size (measured on
+# Vertex: ~190K tokens in 22 s, ~790K in 140 s). Deep jobs (audit, map, refactor) use the full budget.
+ANALYZE_MAX_TOKENS = min(MAX_CONTEXT_TOKENS, _env_int("GEMINI4_ANALYZE_MAX_TOKENS", 400_000))
 MAX_FILES = _env_int("GEMINI4_MAX_FILES", 1500)
 MAX_FILE_BYTES = _env_int("GEMINI4_MAX_FILE_BYTES", 1_000_000)
 MAX_RESULT_CHARS = _env_int("GEMINI4_MAX_RESULT_CHARS", 60_000)  # stays under host MCP output caps
@@ -137,6 +143,12 @@ BINARY_EXTENSIONS = {
     ".woff", ".woff2", ".ttf", ".otf", ".eot", ".pyc", ".pyo", ".class", ".o",
     ".a", ".so", ".dylib", ".dll", ".exe", ".bin", ".wasm", ".docx", ".xlsx",
     ".pptx", ".mp3", ".mp4", ".mov", ".avi", ".sqlite", ".db", ".parquet",
+    ".ogg", ".oga", ".opus", ".wav", ".flac", ".m4a", ".aac", ".aiff", ".mid", ".midi",
+    ".webm", ".mkv", ".m4v", ".mpg", ".mpeg", ".3gp", ".flv", ".wmv",
+    ".avif", ".heic", ".heif", ".icns", ".psd", ".ai", ".sketch", ".fig", ".xcf", ".blend",
+    ".fbx", ".glb", ".obj", ".stl", ".ttc", ".swf", ".apk", ".aab", ".ipa", ".dmg", ".iso",
+    ".deb", ".rpm", ".msi", ".npy", ".npz", ".pkl", ".pickle", ".pt", ".pth", ".onnx", ".h5",
+    ".tflite", ".safetensors", ".ckpt", ".mlmodel", ".keras", ".pb", ".avro", ".orc", ".feather",
 }
 
 # Never read these, even when named explicitly.
@@ -396,19 +408,27 @@ def _in_git_repo(root: Path) -> bool:
     return bool(out and out.strip() == "true")
 
 
+# Dependency and cache directories that are never project source, even when committed. Other
+# IGNORE_DIRS entries (build, dist, vendor, ...) are kept when git tracks them, at low priority:
+# some projects keep real source in build/, and git's ignore rules already drop build output.
+ALWAYS_SKIP_DIRS = {
+    ".git", "node_modules", "__pycache__", ".venv", "venv", ".tox", ".mypy_cache", ".pytest_cache",
+    ".gradle", ".idea", ".terraform", ".next", ".turbo", STAGING_DIRNAME,
+}
+
+
 def _expand_dir(directory: Path, root: Path, use_git: bool) -> List[Path]:
     if use_git:
         rel = os.path.relpath(directory, root)
-        out = _git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", rel)
+        out = _git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", rel, timeout=60)
         if out is not None:
             files = []
             for item in out.split("\0"):
                 if not item:
                     continue
-                p = root / item
-                if any(part in IGNORE_DIRS for part in Path(item).parts):
+                if any(part in ALWAYS_SKIP_DIRS for part in item.split("/")):
                     continue
-                files.append(p)
+                files.append(root / item)
             return sorted(files)
     files = []
     for cur, dirs, names in os.walk(directory):
@@ -417,6 +437,18 @@ def _expand_dir(directory: Path, root: Path, use_git: bool) -> List[Path]:
             if not name.startswith("."):
                 files.append(Path(cur) / name)
     return files
+
+
+def _git_tracked_ignored(root: Path) -> set:
+    """Tracked files that match an ignore rule. Untracked ignored files never reach the candidate
+    list (ls-files --exclude-standard drops them), so this covers directory and glob expansion
+    without a per-file check-ignore, which takes tens of seconds on large repositories."""
+    if _env("GEMINI4_INCLUDE_IGNORED") == "1":
+        return set()
+    out = _git(root, "ls-files", "-z", "--cached", "--ignored", "--exclude-standard", timeout=60)
+    if out is None:
+        return {"\0fail-closed"}
+    return {r for r in out.split("\0") if r}
 
 
 def _git_ignored(root: Path, rels: List[str]) -> set:
@@ -440,6 +472,132 @@ def _git_ignored(root: Path, rels: List[str]) -> set:
     return {r for r in proc.stdout.split("\0") if r}
 
 
+def _glob_regex(pattern: str) -> "re.Pattern[str]":
+    """Shell glob to regex over '/'-separated paths: `*` and `?` stay inside one path segment,
+    `**/` matches any number of directories (including none)."""
+    out, i = [], 0
+    while i < len(pattern):
+        c = pattern[i]
+        if pattern.startswith("**/", i):
+            out.append("(?:.*/)?"); i += 3; continue
+        if pattern.startswith("**", i):
+            out.append(".*"); i += 2; continue
+        if c == "*":
+            out.append("[^/]*")
+        elif c == "?":
+            out.append("[^/]")
+        elif c == "[":
+            j = pattern.find("]", i + 2)
+            if j == -1:
+                out.append(re.escape(c))
+            else:
+                body = pattern[i + 1:j]
+                if body.startswith("!"):
+                    body = "^" + body[1:]
+                out.append("[" + body.replace("\\", "\\\\") + "]")
+                i = j
+        else:
+            out.append(re.escape(c))
+        i += 1
+    return re.compile("".join(out))
+
+
+def fair_order(rels: List[str]) -> List[str]:
+    """Order paths so that sibling directories take turns at every level of the tree.
+
+    When the budget runs out part way, every area of the repository is still represented,
+    instead of the alphabetically first directory taking everything.
+    """
+    def build(items: List[Tuple[str, ...]], level: int) -> List[Tuple[str, ...]]:
+        leaves: List[Tuple[str, ...]] = []
+        groups: Dict[str, List[Tuple[str, ...]]] = {}
+        for parts in items:
+            if len(parts) == level + 1:
+                leaves.append(parts)
+            else:
+                groups.setdefault(parts[level], []).append(parts)
+        seqs = [sorted(leaves)] + [build(groups[k], level + 1) for k in sorted(groups)]
+        out: List[Tuple[str, ...]] = []
+        iters = [iter(seq) for seq in seqs if seq]
+        while iters:
+            alive = []
+            for it in iters:
+                nxt = next(it, None)
+                if nxt is not None:
+                    out.append(nxt)
+                    alive.append(it)
+            iters = alive
+        return out
+
+    return ["/".join(parts) for parts in build([tuple(r.split("/")) for r in rels], 0)]
+
+
+_ASCII_LETTERS = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+_ASCII_WS = b" \t\n\r\x0b\x0c"
+_WS_RUN_RE = re.compile(rb"\s+")
+
+
+def estimate_tokens(text: str) -> int:
+    """Approximate Gemini token count from character classes.
+
+    A flat chars/4 rule undercounts dense text badly: inline SVG and markup run at 1.3-1.6 chars
+    per token, code at 2.7-3.2. Weights were fitted to countTokens results on several hundred
+    source, markup, data and docs files (median within ~10%, worst file about 0.82x).
+    """
+    if not text:
+        return 0
+    raw = text.encode("ascii", "ignore")
+    n = len(raw)
+    letters = n - len(raw.translate(None, _ASCII_LETTERS))
+    digits = n - len(raw.translate(None, b"0123456789"))
+    space = n - len(raw.translate(None, _ASCII_WS))
+    runs = _WS_RUN_RE.subn(b"", raw)[1]
+    other = n - letters - digits - space
+    return int(0.25 * letters + digits + 0.8 * other + 0.5 * runs + (len(text) - n)) + 1
+
+
+# When everything does not fit, code is read first and bulky data last, so translation catalogs,
+# fixtures or inline SVG cannot crowd the source out of the budget.
+LOW_PRIORITY_DIRS = {
+    "_messages", "messages", "locale", "locales", "i18n", "l10n", "translations", "lang", "langs",
+    "fixtures", "testdata", "__snapshots__", "snapshots", "third_party", "third-party", "generated",
+    "build", "dist", "out", "target", "vendor", "env", "changelog", "changelogs", "licenses",
+}
+# Release notes, legal text and generated code: large, and rarely what a question is about.
+DOC_SUFFIXES = {"", ".md", ".markdown", ".txt", ".rst", ".adoc"}
+LOW_PRIORITY_DOC_RE = re.compile(  # applied to doc-like files only, so history.go stays code
+    r"^(?:changelog|changes|history|news|release[-_]?notes|releases|license|licence|copying|notice|"
+    r"authors|contributors|third[-_]party[-_]notices)\b",
+    re.IGNORECASE,
+)
+GENERATED_NAME_RE = re.compile(
+    r"^zz_generated|[._-]generated\.|\.pb\.go$|\.pb\.gw\.go$|_pb2(?:_grpc)?\.py$|\.gen\.go$"
+    r"|\.g\.dart$|\.designer\.cs$|\.pb\.(?:h|cc|swift)$|_pb\.(?:js|d\.ts)$",
+    re.IGNORECASE,
+)
+LOW_PRIORITY_NAMES = {
+    "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock",
+    "Pipfile.lock", "Cargo.lock", "Gemfile.lock", "composer.lock", "go.sum", "uv.lock",
+    "OWNERS", "OWNERS_ALIASES", "CODEOWNERS", "SECURITY_CONTACTS",
+}
+DATA_SUFFIXES = {".json", ".jsonl", ".csv", ".tsv", ".xml", ".html", ".htm", ".txt", ".po", ".pot", ".xlf"}
+LOW_PRIORITY_SUFFIXES = {".svg", ".map", ".lock", ".snap"}
+
+
+def file_priority(rel: str) -> int:
+    """0 = code, docs and config; 1 = data and markup; 2 = bulky generated or vendored data."""
+    p = Path(rel)
+    name = p.name
+    if (name in LOW_PRIORITY_NAMES or p.suffix.lower() in LOW_PRIORITY_SUFFIXES
+            or name.endswith((".min.js", ".min.css")) or GENERATED_NAME_RE.search(name)
+            or ((p.suffix.lower() in DOC_SUFFIXES or p.suffix[1:].isdigit()) and LOW_PRIORITY_DOC_RE.match(name))
+            or any(part.lower() in LOW_PRIORITY_DIRS for part in p.parts[:-1])):
+        return 2
+    if p.suffix.lower() in DATA_SUFFIXES:
+        return 1
+    return 0
+
+
 def _looks_binary(path: Path) -> bool:
     try:
         with path.open("rb") as fh:
@@ -454,6 +612,7 @@ def collect_files(
     include_globs: Optional[List[str]] = None,
     max_chars: int = MAX_CONTEXT_CHARS,
     numbered: bool = True,
+    max_tokens: int = MAX_CONTEXT_TOKENS,
 ) -> Tuple[str, Dict[str, Any]]:
     """Resolve path pointers inside `root` and build a delimited text corpus.
 
@@ -466,7 +625,14 @@ def collect_files(
 
     use_git = _in_git_repo(root)
     candidates: List[Path] = []
+    explicit: List[Path] = []
     rejected: List[str] = []
+    tracked_cache: List[Path] = []
+
+    def tracked() -> List[Path]:
+        if not tracked_cache:
+            tracked_cache.extend(_expand_dir(root, root, use_git))
+        return tracked_cache
 
     for raw in paths:
         target = str(raw).strip()
@@ -484,41 +650,122 @@ def collect_files(
             rejected.append(f"{target} (outside workspace)")
             continue
         if resolved.is_file():
-            candidates.append(resolved)
+            explicit.append(resolved)
         elif resolved.is_dir():
             candidates.extend(_expand_dir(resolved, root, use_git))
         elif any(ch in target for ch in "*?["):
-            # Same filters as directory expansion: .gitignore, ignored dirs, hidden paths.
-            tracked = set(_expand_dir(root, root, use_git)) if use_git else None
-            for match in sorted(root.glob(target)):
-                rel_parts = match.relative_to(root).parts
-                if any(part in IGNORE_DIRS or part.startswith(".") for part in rel_parts):
+            # Matched against the file list rather than walking the disk, so dependency trees such as
+            # node_modules are never traversed. Same filters as directory expansion.
+            if p.is_absolute():
+                if not target.startswith(str(root) + os.sep):
+                    rejected.append(f"{target} (outside workspace)")
                     continue
-                if tracked is not None and match not in tracked:
-                    continue
-                m = match.resolve()
-                if m.is_file() and _is_within(m, root):
-                    candidates.append(m)
+                pattern = target[len(str(root)) + 1:]
+            else:
+                pattern = target[2:] if target.startswith("./") else target
+            if use_git:
+                rx = _glob_regex(pattern)
+                for match in tracked():
+                    rel_parts = match.relative_to(root).parts
+                    if any(part.startswith(".") for part in rel_parts) or not rx.fullmatch("/".join(rel_parts)):
+                        continue
+                    candidates.append(match)
+            else:
+                for match in sorted(root.glob(pattern)):
+                    rel_parts = match.relative_to(root).parts
+                    if any(part in IGNORE_DIRS or part.startswith(".") for part in rel_parts):
+                        continue
+                    if match.is_file():
+                        candidates.append(match)
         else:
             rejected.append(f"{target} (not found)")
+
+    skipped = {"secret_file": [], "ignored": [], "binary": 0, "too_large": 0, "filtered": 0, "over_budget": 0}
+    # Expanded candidates are lexically under root (from git or os.walk), so their relative path is
+    # a string slice; symlinks are resolved and re-checked when a file is actually read.
+    root_prefix = str(root).rstrip(os.sep) + os.sep
+    rel_of: Dict[Path, str] = {}
+    for c in candidates:
+        sc = str(c)
+        if sc.startswith(root_prefix):
+            rel_of[c] = sc[len(root_prefix):].replace(os.sep, "/")
+    for c in explicit:
+        try:
+            rel_of[c] = os.path.relpath(c, root).replace(os.sep, "/")
+        except ValueError:
+            pass
+    ignored = _git_ignored(root, sorted({rel_of[c] for c in explicit if c in rel_of}))
+    tracked_ignored = _git_tracked_ignored(root) if use_git and candidates else set()
+    if "\0fail-closed" in tracked_ignored:  # could not ask git: fall back to checking every file
+        tracked_ignored = _git_ignored(root, sorted(set(rel_of.values())))
+    ignored |= tracked_ignored
+
+    # Order: files named explicitly, then code, then data and markup, then bulky generated data.
+    # Within a tier, directories take turns, so a partial read still covers the whole tree.
+    by_rel: Dict[str, Path] = {}
+    for c in candidates:
+        r = rel_of.get(c)
+        if r is not None and not r.startswith("..") and r not in by_rel:
+            by_rel[r] = c
+    tiers: Dict[int, List[str]] = {}
+    for r in by_rel:
+        tiers.setdefault(file_priority(r), []).append(r)
+    ordered: List[Path] = list(explicit)
+    for t in sorted(tiers):
+        ordered.extend(by_rel[r] for r in fair_order(tiers[t]))
+    ordered.extend(c for c in candidates if c not in rel_of or rel_of[c].startswith(".."))
 
     seen = set()
     chunks: List[str] = []
     included: List[str] = []
-    skipped = {"secret_file": [], "ignored": [], "binary": 0, "too_large": 0, "filtered": 0, "over_budget": 0}
-    rel_of = {}
-    for c in candidates:
-        try:
-            rel_of[c] = os.path.relpath(c.resolve(), root)
-        except (OSError, ValueError):
-            pass
-    ignored = _git_ignored(root, sorted({r for r in rel_of.values() if not r.startswith("..")}))
     total_chars = 0
+    total_tokens = 0
     redactions = 0
     truncated = False
     omitted: List[str] = []
+    deferred: List[Tuple[Path, str, int]] = []  # (path, rel, tokens): placed after everything else
+    misses = 0  # consecutive files that did not fit; a long run means the budget is effectively full
 
-    for fpath in candidates:
+    def load(real: Path, rel: str) -> Optional[Tuple[str, int, int]]:
+        try:
+            text = real.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+        text, n_redacted = redact_secrets(text)
+        if numbered:
+            text = "\n".join(f"{i:>5}| {line}" for i, line in enumerate(text.splitlines(), 1))
+        chunk = f"<file path={json.dumps(rel)}>\n{text}\n</file>"
+        return chunk, estimate_tokens(chunk), n_redacted
+
+    def over_budget(rel: str) -> None:
+        nonlocal truncated, misses
+        misses += 1
+        skipped["over_budget"] += 1
+        truncated = True
+        if len(omitted) < 15:
+            omitted.append(rel)
+
+    def admit(rel: str, chunk: str, tokens: int, n_redacted: int) -> bool:
+        nonlocal total_chars, total_tokens, redactions, misses
+        if len(included) >= MAX_FILES or total_chars + len(chunk) > max_chars or total_tokens + tokens > max_tokens:
+            return False
+        chunks.append(chunk)
+        included.append(rel)
+        total_chars += len(chunk)
+        total_tokens += tokens
+        redactions += n_redacted
+        misses = 0
+        return True
+
+    for idx, fpath in enumerate(ordered):
+        if len(included) >= MAX_FILES or max_tokens - total_tokens < 64 or misses >= 200:
+            # Budget is full: count the rest without opening them.
+            for rest in ordered[idx:]:
+                if rest.suffix.lower() in BINARY_EXTENSIONS:
+                    skipped["binary"] += 1
+                elif not is_secret_file(Path(rel_of.get(rest, rest.name))):
+                    over_budget(rel_of.get(rest, rest.name))
+            break
         real = fpath.resolve()
         if real in seen:
             continue
@@ -526,16 +773,19 @@ def collect_files(
         if not _is_within(real, root):  # symlink escaping the workspace
             rejected.append(f"{fpath} (symlink outside workspace)")
             continue
-        rel = os.path.relpath(real, root)
+        rel = os.path.relpath(real, root).replace(os.sep, "/")
         try:
-            if not stat.S_ISREG(real.stat().st_mode):  # FIFOs, sockets, devices
-                continue
+            st = real.stat()
         except OSError:
+            continue
+        if not stat.S_ISREG(st.st_mode):  # FIFOs, sockets, devices
             continue
         if is_secret_file(Path(rel)) or is_secret_file(real) or _inside_git_dir(real, root):
             skipped["secret_file"].append(rel)
             continue
-        if rel in ignored:
+        lexical = rel_of.get(fpath, rel)
+        if rel in ignored or lexical in ignored or (lexical != rel and _git_ignored(root, [rel])):
+            # A symlink resolving elsewhere is checked against the ignore rules at its target.
             skipped["ignored"].append(rel)
             continue
         if include_globs and not any(
@@ -543,29 +793,41 @@ def collect_files(
         ):
             skipped["filtered"] += 1
             continue
-        if real.suffix.lower() in BINARY_EXTENSIONS or _looks_binary(real):
+        if real.suffix.lower() in BINARY_EXTENSIONS:
             skipped["binary"] += 1
             continue
-        try:
-            if real.stat().st_size > MAX_FILE_BYTES:
-                skipped["too_large"] += 1
-                continue
-            text = real.read_text(encoding="utf-8", errors="replace")
-        except OSError:
+        if st.st_size > MAX_FILE_BYTES:
+            skipped["too_large"] += 1
             continue
-        if len(included) >= MAX_FILES or total_chars + len(text) > max_chars:
-            skipped["over_budget"] += 1
-            if len(omitted) < 15:
-                omitted.append(rel)
-            truncated = True
+        # No text runs below ~5 bytes per token, so a file this large cannot fit: skip the read.
+        if st.st_size // 5 > max_tokens - total_tokens or total_chars + st.st_size // 4 > max_chars:
+            over_budget(rel)
             continue
-        text, n = redact_secrets(text)
-        redactions += n
-        if numbered:
-            text = "\n".join(f"{i:>5}| {line}" for i, line in enumerate(text.splitlines(), 1))
-        chunks.append(f"<file path={json.dumps(rel)}>\n{text}\n</file>")
-        included.append(rel)
-        total_chars += len(text)
+        if _looks_binary(real):
+            skipped["binary"] += 1
+            continue
+        loaded = load(real, rel)
+        if loaded is None:
+            continue
+        chunk, tokens, n = loaded
+        # Dense files (minified, inline SVG) and any single file over 1/12 of the budget wait until
+        # everything else is placed, so one giant file cannot displace hundreds of ordinary ones.
+        # Only the size is kept; the text is re-read if the file is admitted later.
+        if fpath not in explicit and ((len(chunk) > 20_000 and tokens * 2 > len(chunk))
+                                      or tokens > max_tokens // 12):
+            deferred.append((real, rel, tokens))
+            misses += 1
+            continue
+        if not admit(rel, chunk, tokens, n):
+            over_budget(rel)
+
+    for real, rel, tokens in sorted(deferred, key=lambda d: d[2]):  # smallest first: fits the most
+        if total_tokens + tokens > max_tokens or len(included) >= MAX_FILES:
+            over_budget(rel)
+            continue
+        loaded = load(real, rel)
+        if loaded is None or not admit(rel, *loaded):
+            over_budget(rel)
 
     if not included:
         detail = "; ".join(rejected[:5]) or "no readable text files matched"
@@ -575,7 +837,7 @@ def collect_files(
         "files_read": len(included),
         "files": included,
         "chars": total_chars,
-        "approx_tokens": total_chars // 4,
+        "approx_tokens": total_tokens,
         "truncated": truncated,
         "omitted": omitted,
         "redactions": redactions,
@@ -836,7 +1098,9 @@ def _http_error_message(code: int, body: str, model: str) -> str:
         msg = body
     msg = (msg or "").strip()[:400]
     hints = {
-        400: "Check the request parameters and model ID.",
+        400: ("The input is over the model's token limit. Narrow `paths`, or lower GEMINI4_MAX_CONTEXT_TOKENS."
+              if "token" in (msg or "").lower() and any(w in (msg or "").lower() for w in ("exceed", "limit", "too long"))
+              else "Check the request parameters and model ID."),
         401: "Credentials rejected. Re-check GEMINI_API_KEY or run `gcloud auth application-default login`.",
         403: "Permission denied. The key or project lacks access to this model, or billing is not enabled.",
         404: f"Model `{model}` is not available to this project or location.",
@@ -1616,7 +1880,7 @@ def tool_status() -> str:
         f"- Models: flash=`{MODEL_FLASH}`, pro=`{MODEL_PRO}`, flash-lite=`{MODEL_LITE}`, security=`{MODEL_SECURITY}`",
         f"- Antigravity CLI: {agy or 'not found'}"
         + ("" if not agy else (" (enabled)" if _env("GEMINI4_ENABLE_AGY_CLI") == "1" else " (disabled; set GEMINI4_ENABLE_AGY_CLI=1)")),
-        f"- Context budget per call: {MAX_CONTEXT_CHARS:,} chars (~{MAX_CONTEXT_CHARS // 4:,} tokens), max {MAX_FILES} files",
+        f"- Context budget per call: ~{MAX_CONTEXT_TOKENS:,} estimated tokens, max {MAX_FILES} files",
         "",
     ]
     if not USAGE:
@@ -1657,7 +1921,8 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
         if not question:
             raise ToolError("`question` is required.")
         model = _tier(args, "flash")
-        corpus, meta = collect_files(list(args.get("paths") or []), root, args.get("include_globs"))
+        corpus, meta = collect_files(list(args.get("paths") or []), root, args.get("include_globs"),
+                                     max_tokens=ANALYZE_MAX_TOKENS)
         if args.get("estimate_only"):
             return estimate_reply(name, model, meta)
         res = call_gemini(
@@ -1709,9 +1974,10 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
                             + (f" Excluded secret files: {excluded}." if excluded else "")
                             + (f" Binary files changed (not reviewed): {binary_changed[:10]}." if binary_changed else ""))
         diff = _git(root, *diff_args, "--unified=5", "--", *allowed, timeout=60) or ""
-        if len(diff) > MAX_CONTEXT_CHARS // 2:
+        diff_tokens = estimate_tokens(diff)
+        if len(diff) > MAX_CONTEXT_CHARS // 2 or diff_tokens > MAX_CONTEXT_TOKENS // 2:
             raise ToolError(
-                f"Diff is {len(diff):,} chars, too large for one review. Review in parts with a narrower base."
+                f"Diff is ~{diff_tokens:,} tokens, too large for one review. Review in parts with a narrower base."
             )
         diff, redactions = redact_secrets(diff)
         context, meta = "", None
@@ -1719,7 +1985,8 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
             existing = [n for n in allowed if (root / n).is_file()]
             if existing:
                 try:
-                    context, meta = collect_files(existing, root, max_chars=MAX_CONTEXT_CHARS - len(diff))
+                    context, meta = collect_files(existing, root, max_chars=MAX_CONTEXT_CHARS - len(diff),
+                                                  max_tokens=MAX_CONTEXT_TOKENS - diff_tokens)
                 except ToolError:
                     context, meta = "", None
         focus = str(args.get("focus") or "").strip()
@@ -1780,10 +2047,11 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
 
     if name == "gemini4_triage_failures":
         log_rel = str(args.get("log_path") or "").strip()
-        log_corpus, log_desc = read_log_digest(log_rel, root, MAX_CONTEXT_CHARS // 3)
+        log_corpus, log_desc = read_log_digest(log_rel, root, min(MAX_CONTEXT_CHARS // 3, MAX_CONTEXT_TOKENS))
         src_corpus, src_meta = "", None
         if args.get("paths"):
-            src_corpus, src_meta = collect_files(list(args["paths"]), root, max_chars=MAX_CONTEXT_CHARS - len(log_corpus))
+            src_corpus, src_meta = collect_files(list(args["paths"]), root, max_chars=MAX_CONTEXT_CHARS - len(log_corpus),
+                                                 max_tokens=MAX_CONTEXT_TOKENS - estimate_tokens(log_corpus))
         question = str(args.get("question") or "").strip()
         prompt = (
             f"## Test / build output\n{log_corpus}\n\n"

@@ -25,7 +25,7 @@
 | `GEMINI4_PRIMARY_MODEL`, `GEMINI4_SUBAGENT_MODEL`, `GEMINI4_BACKGROUND_MODEL` | Override the pro, flash and flash-lite models |
 | `GEMINI4_SECURITY_MODEL` | Model for audits, if different from the pro model |
 | `GEMINI4_WORKSPACE_ROOT` | Folder the server may read (default: the project directory) |
-| `GEMINI4_MAX_CONTEXT_CHARS`, `GEMINI4_MAX_FILES`, `GEMINI4_MAX_FILE_BYTES` | Per-call limits (2.4M chars, 1,500 files, 1 MB per file) |
+| `GEMINI4_MAX_CONTEXT_TOKENS`, `GEMINI4_ANALYZE_MAX_TOKENS`, `GEMINI4_MAX_CONTEXT_CHARS`, `GEMINI4_MAX_FILES`, `GEMINI4_MAX_FILE_BYTES` | Per-call limits (750K estimated tokens, 400K for `/gemini:analyze`, 4M chars, 1,500 files, 1 MB per file). When a scope does not fit, source code is read first, directories take turns, and translation catalogs, lockfiles, generated code and SVG come last. |
 | `GEMINI4_REQUEST_TIMEOUT` | Seconds per Gemini call (default 900) |
 | `GEMINI4_MAX_MEDIA_BYTES` | Total size of images, video and PDFs per call (default 14 MB; inline requests are limited to about 20 MB after encoding) |
 | `GEMINI4_ENABLE_AGY_CLI=1` | Let `/gemini:ask-antigravity` use the Antigravity CLI |

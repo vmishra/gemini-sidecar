@@ -720,5 +720,148 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(srv.normalize_model_id("gemini-3.8-flash[effort=low]"), "gemini-3.8-flash")
 
 
+class ContextBudgetTests(Workspace):
+    """Token budgeting: dense text must not slip past the limit, and code must win over bulk data."""
+
+    def test_dense_markup_is_not_undercounted(self):
+        # Inline SVG path data tokenizes at ~1.3 chars/token; a flat chars/4 estimate was 3x low.
+        svg = '<path d="' + "M32,62L54,32 58,53 " * 2000 + '"/>'
+        self.assertGreater(srv.estimate_tokens(svg), len(svg) / 2)
+        prose = "The quick brown fox jumps over the lazy dog. " * 200
+        self.assertLess(srv.estimate_tokens(prose), len(prose) / 3)
+        self.assertEqual(srv.estimate_tokens(""), 0)
+        self.assertGreaterEqual(srv.estimate_tokens("\u65e5\u672c\u8a9e" * 100), 300)  # ~1 token per CJK char
+
+    def test_budget_is_enforced_in_estimated_tokens(self):
+        (self.root / "src" / "art.svg").write_text("<svg>" + "1,2 3,4 " * 5000 + "</svg>")
+        _, meta = srv.collect_files(["src/"], self.root, max_tokens=5_000)
+        self.assertLessEqual(meta["approx_tokens"], 5_000)
+        self.assertIn("src/art.svg", meta["omitted"])
+
+    def test_code_is_read_before_translation_catalogs(self):
+        (self.root / "_messages").mkdir()
+        for lang in ("ar", "de", "en", "fr"):  # sorts before src/
+            (self.root / "_messages" / f"{lang}.json").write_text(json.dumps({"k%d" % i: "v" * 40 for i in range(300)}))
+        (self.root / "src" / "main.js").write_text("export function main() { return 1; }\n" * 50)
+        _, meta = srv.collect_files(["."], self.root, max_tokens=4_000)
+        self.assertIn("src/main.js", meta["files"])
+        self.assertIn("src/app.py", meta["files"])
+        self.assertTrue(any(f.startswith("_messages/") for f in meta["omitted"]))
+
+    def test_explicit_files_keep_first_place(self):
+        (self.root / "data.json").write_text("{}")
+        _, meta = srv.collect_files(["data.json", "src/app.py"], self.root)
+        self.assertEqual(meta["files"][0], "data.json")
+
+    def test_priority_tiers(self):
+        self.assertEqual(srv.file_priority("static/src/app.js"), 0)
+        self.assertEqual(srv.file_priority("README.md"), 0)
+        self.assertEqual(srv.file_priority("static/scenes/x/index.html"), 1)
+        self.assertEqual(srv.file_priority("_messages/fr.json"), 2)
+        self.assertEqual(srv.file_priority("package-lock.json"), 2)
+        self.assertEqual(srv.file_priority("img/logo.svg"), 2)
+        self.assertEqual(srv.file_priority("dist/app.min.js"), 2)
+        self.assertEqual(srv.file_priority("CHANGELOG/CHANGELOG-1.10.md"), 2)
+        self.assertEqual(srv.file_priority("CHANGELOG.md"), 2)
+        self.assertEqual(srv.file_priority("LICENSE"), 2)
+        self.assertEqual(srv.file_priority("pkg/apis/zz_generated.deepcopy.go"), 2)
+        self.assertEqual(srv.file_priority("api/v1/types.pb.go"), 2)
+        self.assertEqual(srv.file_priority("proto/user_pb2.py"), 2)
+        self.assertEqual(srv.file_priority("pkg/history.go"), 0)
+        self.assertEqual(srv.file_priority("src/licenseCheck.ts"), 0)
+
+
+    def test_glob_semantics(self):
+        rx = srv._glob_regex
+        self.assertTrue(rx("*.py").fullmatch("a.py"))
+        self.assertFalse(rx("*.py").fullmatch("src/a.py"))
+        self.assertTrue(rx("**/*.py").fullmatch("a.py"))
+        self.assertTrue(rx("**/*.py").fullmatch("src/x/a.py"))
+        self.assertTrue(rx("src/**").fullmatch("src/x/a.py"))
+        self.assertTrue(rx("src/[ab].py").fullmatch("src/a.py"))
+        self.assertFalse(rx("src/[!ab].py").fullmatch("src/a.py"))
+
+    def test_fair_order_lets_every_directory_take_turns(self):
+        rels = [f"big/f{i}.js" for i in range(50)] + ["core/a.js", "core/b.js", "z.md"]
+        head = srv.fair_order(rels)[:6]
+        self.assertIn("core/a.js", head)
+        self.assertIn("z.md", head)
+
+    def test_large_directory_cannot_starve_the_rest(self):
+        (self.root / "aaa_scenes").mkdir()
+        for i in range(40):
+            (self.root / "aaa_scenes" / f"s{i}.js").write_text("let x = %d;\n" % i * 200)
+        (self.root / "zcore").mkdir()
+        (self.root / "zcore" / "loader.js").write_text("export const load = () => 1;\n")
+        _, meta = srv.collect_files(["."], self.root, max_tokens=6_000)
+        self.assertTrue(meta["truncated"])
+        self.assertIn("zcore/loader.js", meta["files"])
+
+    def test_tracked_build_dir_is_read_but_node_modules_never(self):
+        (self.root / "build").mkdir()
+        (self.root / "build" / "tool.js").write_text("module.exports = 1;\n")
+        (self.root / "node_modules" / "dep").mkdir(parents=True)
+        (self.root / "node_modules" / "dep" / "index.js").write_text("nm-canary\n")
+        subprocess.run(["git", "add", "-f", "-A"], cwd=self.root, check=True)
+        corpus, meta = srv.collect_files(["."], self.root)
+        self.assertIn("build/tool.js", meta["files"])
+        self.assertNotIn("nm-canary", corpus)
+        corpus, meta = srv.collect_files(["**/*.js"], self.root)
+        self.assertIn("build/tool.js", meta["files"])
+        self.assertNotIn("nm-canary", corpus)
+
+    def test_dense_files_are_read_after_regular_code(self):
+        (self.root / "a_bundle.js").write_text("var a=[" + ",".join(str(i) for i in range(20000)) + "];")
+        _, meta = srv.collect_files(["."], self.root)
+        self.assertEqual(meta["files"][-1], "a_bundle.js")
+
+    def test_one_huge_file_cannot_displace_many_small_ones(self):
+        (self.root / "aa_huge.py").write_text("def f():\n    return 'x'\n" * 3000)
+        for i in range(20):
+            (self.root / "src" / f"mod{i}.py").write_text("def g%d():\n    return %d\n" % (i, i))
+        _, meta = srv.collect_files(["."], self.root, max_tokens=12_000)
+        self.assertEqual(sum(f.startswith("src/mod") for f in meta["files"]), 20)
+        self.assertIn("aa_huge.py", meta["omitted"])
+
+    def test_files_past_the_budget_are_not_opened(self):
+        for i in range(600):
+            (self.root / "src" / f"m{i}.py").write_text("x = 1\n" * 400)
+        real_read = Path.read_text
+        calls = []
+        def counting(self_path, *a, **k):
+            calls.append(self_path)
+            return real_read(self_path, *a, **k)
+        with mock.patch.object(Path, "read_text", counting):
+            _, meta = srv.collect_files(["src/"], self.root, max_tokens=3_000)
+        self.assertTrue(meta["truncated"])
+        self.assertLess(len(calls), 260)
+        self.assertGreater(meta["skipped"]["over_budget"], 500)
+
+    def test_symlink_to_gitignored_file_is_refused(self):
+        (self.root / "secrets.local.json").write_text("symlinked-ignored-canary\n")
+        (self.root / ".gitignore").write_text("*.log\nsecrets.local.json\n")
+        os.symlink(self.root / "secrets.local.json", self.root / "src" / "settings.json")
+        subprocess.run(["git", "add", "src/settings.json", ".gitignore"], cwd=self.root, check=True)
+        for paths in (["."], ["src/"], ["src/*.json"], ["**/*.json"]):
+            try:
+                corpus, _ = srv.collect_files(paths, self.root)
+            except srv.ToolError:
+                continue  # the symlink was the only match and was refused
+            self.assertNotIn("symlinked-ignored-canary", corpus, paths)
+
+    def test_tracked_but_ignored_file_is_skipped(self):
+        (self.root / "local.cfg").write_text("tracked-ignored-canary\n")
+        subprocess.run(["git", "add", "local.cfg"], cwd=self.root, check=True)
+        (self.root / ".gitignore").write_text("*.log\nlocal.cfg\n")
+        corpus, meta = srv.collect_files(["."], self.root)
+        self.assertNotIn("tracked-ignored-canary", corpus)
+        self.assertIn("local.cfg", meta["skipped"]["ignored"])
+
+    def test_token_limit_error_has_actionable_hint(self):
+        msg = srv._http_error_message(400, json.dumps({"error": {"message":
+              "The input token count (1210000) exceeds the maximum number of tokens allowed (1048576)."}}), "m")
+        self.assertIn("GEMINI4_MAX_CONTEXT_TOKENS", msg)
+
+
 if __name__ == "__main__":
     unittest.main()
