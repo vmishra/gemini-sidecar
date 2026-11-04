@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.3.7 (2026-11-05)
+
+### Added
+- `/gemini:analyze --fast` uses the Flash-Lite model. On a 260K-token question it answered in about 4 seconds, compared with about a minute on Flash.
+
 ## 2.3.6 (2026-11-05)
 
 ### Security

@@ -48,7 +48,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Dict, List, Optional, Tuple
 
 SERVER_NAME = "gemini4"
-SERVER_VERSION = "2.3.6"
+SERVER_VERSION = "2.3.7"
 DEFAULT_PROTOCOL_VERSION = "2025-06-18"
 
 _RPC_OUT: BinaryIO = sys.stdout.buffer
