@@ -301,12 +301,12 @@ class GeminiCallTests(Workspace):
         status = srv.tool_status()
         self.assertIn("| `gemini-4-carbon` | 1 | 1,000 | 400 | 70 |", status)
 
-    def test_carbon_uses_medium_thinking_for_reviews_and_high_for_audits(self):
+    def test_carbon_uses_medium_thinking_everywhere(self):
         self.assertEqual(srv.MODEL_PRO, "gemini-4-carbon")
         self.assertEqual(srv.PRO_DEEP_THINKING, "medium")
         src = SERVER.read_text()
-        self.assertIn('SYS_SECURITY, prompt, thinking_level="high"', src)
-        for sys_name in ("SYS_REVIEW", "SYS_GENERATE", "SYS_SPEC"):
+        self.assertNotIn('thinking_level="high"', src)
+        for sys_name in ("SYS_SECURITY", "SYS_REVIEW", "SYS_GENERATE", "SYS_SPEC"):
             self.assertIn(f"{sys_name}, prompt, thinking_level=PRO_DEEP_THINKING", src)
 
     def test_cost_uses_cached_rate(self):

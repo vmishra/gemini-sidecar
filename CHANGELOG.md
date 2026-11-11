@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.4.3 (2026-11-11)
+
+### Changed
+- `gemini-4-carbon` uses medium thinking for every task, audits included, and in the gateway's All-Gemini main conversation. Set `GEMINI4_PRO_THINKING_LEVEL=high` to raise it, for example for an audit of security-critical code: in our runs, a Carbon audit at high thinking found one more confirmed high-severity issue. A pinned `gemini-4-argon` keeps high thinking.
+- Benchmarks and the README report the medium-thinking Carbon audit: 762 s and $1.49 for 4,278 lines, with 7 findings.
+
 ## 2.4.2 (2026-11-11)
 
 ### Security

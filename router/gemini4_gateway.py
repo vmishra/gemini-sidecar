@@ -655,7 +655,12 @@ def translate_anthropic_to_gemini_payload(body: Dict[str, Any], gemini_model_id:
         max_out = min(max_out, LONG_DECODE_SEGMENT_TOKENS)
     gen_cfg: Dict[str, Any] = {"maxOutputTokens": max_out}
     if "flash-lite" not in gemini_model_id:
-        gen_cfg["thinkingConfig"] = {"thinkingLevel": "HIGH" if is_pro_class else "LOW"}
+        # Carbon defaults to medium (high is several times slower for little gain in a chat loop);
+        # the previous Pro model keeps high.
+        level = "LOW"
+        if is_pro_class:
+            level = "MEDIUM" if gemini_model_id.rsplit("/", 1)[-1] in LONG_DECODE_MODELS else "HIGH"
+        gen_cfg["thinkingConfig"] = {"thinkingLevel": level}
 
     payload: Dict[str, Any] = {
         "contents": contents or [{"role": "user", "parts": [{"text": " "}]}],

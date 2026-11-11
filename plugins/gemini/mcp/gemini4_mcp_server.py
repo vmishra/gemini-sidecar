@@ -54,7 +54,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Dict, List, Optional, Tuple
 
 SERVER_NAME = "gemini4"
-SERVER_VERSION = "2.4.2"
+SERVER_VERSION = "2.4.3"
 DEFAULT_PROTOCOL_VERSION = "2025-06-18"
 
 _RPC_OUT: BinaryIO = sys.stdout.buffer
@@ -128,9 +128,9 @@ REQUEST_TIMEOUT_S = _env_int("GEMINI4_REQUEST_TIMEOUT", 900)
 LONG_DECODE_MODELS = {"gemini-4-carbon"}
 LONG_DECODE_TIMEOUT_S = _env_int("GEMINI4_LONG_DECODE_TIMEOUT", 1260)
 MAX_CONTINUATIONS = _env_int("GEMINI4_MAX_CONTINUATIONS", 8)
-# Thinking level for reviews, refactors, maps and spec checks. Carbon at medium matched or beat the
-# previous model's high-thinking results on these tasks in measured runs, at a fraction of the time
-# (review 21 s against 232 s at high; spec check 5 min against 21 min). Audits keep high thinking.
+# Thinking level for every Pro-model task (audits, reviews, refactors, maps, spec checks). Carbon's
+# default is medium; at high it was 6-10x slower on reviews and spec checks in measured runs.
+# GEMINI4_PRO_THINKING_LEVEL=high raises it, for example for an audit of security-critical code.
 PRO_DEEP_THINKING = "medium" if MODEL_PRO in LONG_DECODE_MODELS else "high"
 STAGING_DIRNAME = ".gemini4-staging"
 
@@ -2352,7 +2352,7 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
         if args.get("estimate_only"):
             return estimate_reply(name, MODEL_SECURITY, meta)
         prompt = f"{corpus}\n\n## Audit request\nAudit the files above." + (f" Focus: {focus}" if focus else "")
-        res = call_gemini(MODEL_SECURITY, SYS_SECURITY, prompt, thinking_level="high", max_output_tokens=32768)
+        res = call_gemini(MODEL_SECURITY, SYS_SECURITY, prompt, thinking_level=PRO_DEEP_THINKING, max_output_tokens=32768)
         return _clip(res["text"]) + usage_footer(res, describe_scope(meta))
 
     if name == "gemini4_review_diff":

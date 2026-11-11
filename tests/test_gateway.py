@@ -390,9 +390,11 @@ class TranslationTests(unittest.TestCase):
 
     def test_pro_class_models_get_high_thinking(self):
         body = {"messages": [{"role": "user", "content": "x"}], "max_tokens": 100}
-        for model in ("gemini-4-carbon", "gemini/gemini-4-carbon", "gemini-4-argon"):
+        for model in ("gemini-4-carbon", "gemini/gemini-4-carbon"):
             payload = gw.translate_anthropic_to_gemini_payload(body, model)
-            self.assertEqual(payload["generationConfig"]["thinkingConfig"]["thinkingLevel"], "HIGH", model)
+            self.assertEqual(payload["generationConfig"]["thinkingConfig"]["thinkingLevel"], "MEDIUM", model)
+        payload = gw.translate_anthropic_to_gemini_payload(body, "gemini-4-argon")
+        self.assertEqual(payload["generationConfig"]["thinkingConfig"]["thinkingLevel"], "HIGH")
         payload = gw.translate_anthropic_to_gemini_payload(body, "gemini-3.8-flash")
         self.assertEqual(payload["generationConfig"]["thinkingConfig"]["thinkingLevel"], "LOW")
 

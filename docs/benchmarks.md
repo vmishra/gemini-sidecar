@@ -24,26 +24,26 @@ Sources: [Introducing Gemini 4 Carbon](https://blog.google/innovation-and-ai/mod
 
 We ran the same six tasks through the MCP server on both models, with identical inputs, on 11 November 2026.
 
-| Task | `gemini-4-argon` (high thinking) | `gemini-4-carbon` (2.4.1 defaults) |
+| Task | `gemini-4-argon` (high thinking) | `gemini-4-carbon` (medium thinking) |
 |---|---|---|
-| `/gemini:security-audit`, 3 files, 4,278 lines | 563 s, $0.97, 5 findings (2 High) | 516 s, $1.66, 7 findings (3 High) |
+| `/gemini:security-audit`, 3 files, 4,278 lines | 563 s, $0.97, 5 findings (2 High) | 762 s, $1.49, 7 findings (2 High) |
 | `/gemini:review`, diff with 2 planted bugs | 41 s, $0.03, both caught, DO NOT SHIP | 21 s, $0.02, both caught, DO NOT SHIP |
 | `/gemini:analyze --deep`, 106 files, 259K tokens | 43 s, $1.07 | 65 s, $1.12 |
 | `/gemini:spec-check`, RFC 6585 by URL | 119 s, $0.42 | 322 s, $0.49 |
 | `/gemini:refactor`, a 2-file feature | 215 s, $0.39 | 624 s, $0.95 |
 | `/gemini:map`, 2 directories | 121 s, $0.36 | 127 s, $0.35 |
 
-The Carbon column uses the 2.4.1 defaults: high thinking for audits, medium for everything else. Times are wall clock for the whole command. Costs are at Vertex AI global list prices ($4 / $0.20 / $20 per 1M tokens for both models). Google's introductory pricing halves them through 30 November 2026.
+The Carbon column uses the 2.4.3 defaults: medium thinking for every task. Times are wall clock for the whole command. Costs are at Vertex AI global list prices ($4 / $0.20 / $20 per 1M tokens for both models). Google's introductory pricing halves them through 30 November 2026.
 
 ### What the numbers say
 
-- **Audits find more, and different things.** Carbon reported 7 findings to Argon's 5.
-  - Both runs found the same high-severity code-execution issue.
-  - Each run also found one confirmed high-severity issue the other missed. Carbon found a `.git` file that redirects reviews to another repository. Argon found a `workspace_root` that steps into `.git`.
-  - We reproduced all three with proofs of concept, and all are fixed in 2.4.1. Running audits on more than one model is worth it for code that matters.
+- **Audits find more.** Carbon reported 7 findings to Argon's 5, and both runs found the same high-severity code-execution issue.
+  - Argon's run also found a confirmed High issue: a `workspace_root` that steps into `.git`.
+  - A second Carbon audit at high thinking (516 s, 7 findings) found another confirmed High issue no other run reported: a `.git` file that redirects reviews to another repository.
+  - We reproduced all three with proofs of concept, and all are fixed in 2.4.1. For security-critical code, set `GEMINI4_PRO_THINKING_LEVEL=high`, or audit with more than one model.
 - **Reviews are faster.** With medium thinking, the planted-bug review took half the time and caught both bugs.
 - **Long outputs take longer and cost more.** Carbon writes past one response with continuation tokens. Each segment re-reads the prompt and is billed for it, so refactors and audits show more input tokens than the files contain. This is why the Carbon refactor read 48K tokens where Argon read 8K. Google notes Carbon uses more tokens than Argon by design.
-- **Thinking level matters a lot.** At high thinking, Carbon took 232 s for the same review and 21 minutes for the spec check. That is why 2.4.1 uses medium for everything except audits. You can change it with `GEMINI4_PRO_THINKING_LEVEL`.
+- **Thinking level matters a lot.** At high thinking, Carbon took 232 s for the same review and 21 minutes for the spec check. That is why 2.4.3 uses medium for every task. You can change it with `GEMINI4_PRO_THINKING_LEVEL`.
 
 ### What broke on the old settings
 
@@ -58,7 +58,7 @@ Before 2.4.0, the plugin gave every model a 32K output budget and high thinking.
 - **Inputs.** The gemini-sidecar repository at commit `df3397f` (audit, spec check, map) and [google/santa-tracker-web](https://github.com/google/santa-tracker-web) at commit `7b7b0d17c` (review, deep analysis, refactor). The review applies a two-line patch that removes an origin check and changes a timeout from 10 s to 1 s.
 - **Same prompts.** Each task calls the MCP tool exactly as the slash command does. Only the model differs.
 - **One call at a time.** Runs were sequential on a GCE VM in `asia-south1`, against the Vertex AI `global` endpoint.
-- **Single runs.** These are single runs, not averages. Model latency varies: the Carbon audit took 516 s at high thinking in one run and 762 s at medium in another.
+- **Single runs.** These are single runs, not averages. Model latency varies: the same Carbon audit took 762 s at medium thinking and 516 s at high in another run.
 - **Objective checks.** Findings are counted from the audit table; review checks whether each planted bug is named and whether the verdict blocks the change; spec checks count requirements by status. Audit findings were then verified by hand and with proofs of concept.
 - **Since the runs.** From 2.4.1, the server fetches spec URLs itself rather than letting the model fetch them, so the spec-check input differs slightly from the measured run.
 

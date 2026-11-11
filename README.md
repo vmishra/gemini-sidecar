@@ -179,7 +179,7 @@ Real runs against Vertex AI. Costs are at Vertex AI global list prices; Google's
 | `/gemini:analyze`, this whole repository (39 files) | `gemini-3.8-flash` | 103,003 tok | 1,958 tok | 16.5 s | $0.170 |
 | Follow-up question, same files | `gemini-3.8-flash` | 102,988 tok | 573 tok | 8.0 s | $0.158 |
 | `/gemini:analyze --deep`, 106 files of a web app | `gemini-4-carbon` | 258,868 tok | 3,983 tok | 65 s | $1.12 |
-| `/gemini:security-audit`, 3 files (4,278 lines) | `gemini-4-carbon` | 196,228 tok\* | 43,484 tok\*\* | 516 s | $1.66 |
+| `/gemini:security-audit`, 3 files (4,278 lines) | `gemini-4-carbon` | 195,222 tok\* | 35,437 tok\*\* | 762 s | $1.49 |
 | `/gemini:review`, a diff with 2 planted bugs (both caught) | `gemini-4-carbon` | 1,226 tok | 968 tok | 21 s | $0.024 |
 | `/gemini:review --fast`, one uncommitted change | `gemini-3.8-flash` | 280 tok | 1,984 tok | 16 s | $0.016 |
 | `/gemini:refactor`, a 2-file feature | `gemini-4-carbon` | 48,458 tok\* | 37,649 tok\*\* | 624 s | $0.95 |
