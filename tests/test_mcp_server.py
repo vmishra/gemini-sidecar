@@ -1030,6 +1030,18 @@ class LongDecodeTests(unittest.TestCase):
         self.assertIn(":generateContent", op.call_args[0][0].full_url)
         self.assertNotIn("stream", op.call_args[0][0].full_url)
 
+    def test_expired_vertex_token_is_refreshed_once(self):
+        env = {"GOOGLE_GENAI_USE_VERTEXAI": "true", "GOOGLE_CLOUD_PROJECT": "my-proj-123", "GEMINI_API_KEY": ""}
+        err = srv.urllib.error.HTTPError("u", 401, "Unauthorized", {}, io.BytesIO(b'{"error":{"message":"expired"}}'))
+        ok = FakeResponse(("data: " + json.dumps({"candidates": [{"content": {"parts": [{"text": "ok"}]},
+                                                                 "finishReason": "STOP"}]}) + "\n\n").encode())
+        tokens = iter(["old-token", "new-token"])
+        with mock.patch.dict(os.environ, env), mock.patch.object(srv, "_vertex_token", side_effect=lambda: next(tokens)), \
+             mock.patch.object(srv.urllib.request, "urlopen", side_effect=[err, ok]) as op:
+            res = srv.call_gemini("gemini-4-carbon", "sys", "prompt")
+        self.assertEqual(res["text"], "ok")
+        self.assertEqual(op.call_args_list[1][0][0].get_header("Authorization"), "Bearer new-token")
+
     def test_vertex_uses_v1beta1(self):
         env = {"GOOGLE_GENAI_USE_VERTEXAI": "true", "GOOGLE_CLOUD_PROJECT": "my-proj-123", "GEMINI_API_KEY": ""}
         with mock.patch.dict(os.environ, env), mock.patch.object(srv, "_vertex_token", return_value="t"), \

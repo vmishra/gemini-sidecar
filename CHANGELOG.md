@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.4.5 (2026-11-11)
+
+### Fixed
+- Vertex AI access tokens are refreshed and the request retried once on HTTP 401. A long multi-segment Carbon answer could outlive the token it started with.
+
+### Changed
+- Benchmarks and the README report Carbon as the median of three runs with 2.4.4. Single Carbon runs vary a lot: the same review took 30 s in one run and 324 s in another. Across the six tasks, the medians total 20 minutes and $3.33 at Vertex list price, against 32 minutes and $4.42 for the single non-streamed runs published before.
+
 ## 2.4.4 (2026-11-11)
 
 ### Performance

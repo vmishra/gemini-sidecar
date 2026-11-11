@@ -178,21 +178,20 @@ Real runs against Vertex AI. Costs are at Vertex AI global list prices; Google's
 |---|---|---:|---:|---:|---:|
 | `/gemini:analyze`, this whole repository (39 files) | `gemini-3.8-flash` | 103,003 tok | 1,958 tok | 16.5 s | $0.170 |
 | Follow-up question, same files | `gemini-3.8-flash` | 102,988 tok | 573 tok | 8.0 s | $0.158 |
-| `/gemini:analyze --deep`, 106 files of a web app | `gemini-4-carbon` | 258,868 tok | 3,983 tok | 65 s | $1.12 |
-| `/gemini:security-audit`, 3 files (4,278 lines) | `gemini-4-carbon` | 195,222 tok\* | 35,437 tok\*\* | 762 s | $1.49 |
-| `/gemini:review`, a diff with 2 planted bugs (both caught) | `gemini-4-carbon` | 1,226 tok | 968 tok | 21 s | $0.024 |
+| `/gemini:analyze --deep`, 106 files of a web app | `gemini-4-carbon` | 258,868 tok | 3,649 tok | 79 s | $1.11 |
+| `/gemini:security-audit`, 3 files (4,278 lines) | `gemini-4-carbon` | 81,730 tok | 33,185 tok\* | 443 s | $0.93 |
+| `/gemini:review`, a diff with 2 planted bugs (both caught) | `gemini-4-carbon` | 1,226 tok | 1,120 tok | 100 s | $0.027 |
 | `/gemini:review --fast`, one uncommitted change | `gemini-3.8-flash` | 280 tok | 1,984 tok | 16 s | $0.016 |
-| `/gemini:refactor`, a 2-file feature | `gemini-4-carbon` | 48,458 tok\* | 37,649 tok\*\* | 624 s | $0.95 |
-| `/gemini:spec-check`, RFC 6585 by URL | `gemini-4-carbon` | 62,916 tok | 17,617 tok\*\* | 322 s | $0.49 |
-| `/gemini:map`, two directories | `gemini-4-carbon` | 53,363 tok | 7,067 tok | 127 s | $0.36 |
+| `/gemini:refactor`, a 2-file feature | `gemini-4-carbon` | 7,845 tok | 27,775 tok\* | 308 s | $0.59 |
+| `/gemini:spec-check`, RFC 6585 by URL | `gemini-4-carbon` | 33,358 tok | 10,236 tok\* | 112 s | $0.34 |
+| `/gemini:map`, two directories | `gemini-4-carbon` | 53,363 tok | 6,633 tok | 179 s | $0.35 |
 | `/gemini:test-triage`, 30,006-line log, one failure mid-file | `gemini-3.8-flash` | 21,071 tok | 3,703 tok | 26 s | $0.060 |
 | `/gemini:deps`, two pinned packages, with Google Search | `gemini-3.8-flash` | 300 tok | 4,027 tok | 42 s | $0.030 + search |
 | `/gemini:see`, one screenshot + 2 source files | `gemini-3.8-flash` | 1,518 tok | 786 tok | 6.4 s | $0.008 |
 
-\*Includes re-reads. Carbon writes long answers in segments, and each segment re-reads the prompt.
-\*\*Mostly reasoning.
+\*Mostly reasoning.
 
-Flash rows were measured on 3–4 November 2026, Carbon rows on 11 November 2026. Analysis, triage and reviews take seconds. Audits, refactors and spec checks on Carbon take minutes, so start them and keep working. `/gemini:status` reports the same figures for your own session.
+Flash rows were measured on 3–4 November 2026. Carbon rows are the median of three runs on 11 November 2026; single Carbon runs vary a lot, so expect some spread. Analysis, triage and reviews take seconds. Audits, refactors and spec checks on Carbon take minutes, so start them and keep working. `/gemini:status` reports the same figures for your own session.
 
 The triage row shows the log digest at work. Only 766 of the 30,006 lines were sent: every failure, traceback and `file:line`, plus the end of the log, with dropped ranges marked.
 

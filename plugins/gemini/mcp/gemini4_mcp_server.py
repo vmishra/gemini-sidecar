@@ -54,7 +54,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Dict, List, Optional, Tuple
 
 SERVER_NAME = "gemini4"
-SERVER_VERSION = "2.4.4"
+SERVER_VERSION = "2.4.5"
 DEFAULT_PROTOCOL_VERSION = "2025-06-18"
 
 _RPC_OUT: BinaryIO = sys.stdout.buffer
@@ -1337,6 +1337,12 @@ def call_gemini(
             except urllib.error.HTTPError as exc:
                 err_body = exc.read().decode("utf-8", errors="replace")
                 last_error = _http_error_message(exc.code, err_body, model)
+                if exc.code == 401 and backend == "vertex-ai" and attempt < 2:
+                    # Access tokens last about an hour; a long multi-segment answer can outlive one.
+                    fresh = _vertex_token()
+                    if fresh:
+                        headers["Authorization"] = f"Bearer {fresh}"
+                        continue
                 if exc.code in (429, 500, 502, 503, 504) and attempt < 2:
                     time.sleep(4 * (attempt + 1) ** 2)
                     continue
