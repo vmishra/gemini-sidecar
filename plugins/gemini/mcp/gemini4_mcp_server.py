@@ -33,6 +33,7 @@ import base64
 import difflib
 import fnmatch
 import html
+import html.parser
 import ipaddress
 import json
 import os
@@ -53,7 +54,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Dict, List, Optional, Tuple
 
 SERVER_NAME = "gemini4"
-SERVER_VERSION = "2.4.1"
+SERVER_VERSION = "2.4.2"
 DEFAULT_PROTOCOL_VERSION = "2025-06-18"
 
 _RPC_OUT: BinaryIO = sys.stdout.buffer
@@ -502,6 +503,35 @@ def _in_git_repo(root: Path) -> bool:
     return bool(out and out.strip() == "true") and _git_dir_trusted(root)
 
 
+def _has_git_marker(root: Path) -> bool:
+    """A `.git` entry (directory or file) in the root or any parent: this is meant to be a git working tree."""
+    cur = root
+    while True:
+        try:
+            if (cur / ".git").exists():
+                return True
+        except OSError:
+            return True
+        if cur == cur.parent:
+            return False
+        cur = cur.parent
+
+
+def _require_safe_git_or_plain(root: Path) -> bool:
+    """True if git can be used. False for a folder that is not a git working tree at all. Raises when the
+    folder is meant to be a git working tree but git cannot be used safely: walking it without .gitignore
+    would read the user's ignored local files."""
+    if _in_git_repo(root):
+        return True
+    if _has_git_marker(root) and _env("GEMINI4_INCLUDE_IGNORED") != "1":
+        raise ToolError(
+            "This folder is inside a git working tree, but git could not be used safely here (the `.git` entry "
+            "points outside the working tree, git is older than 2.31 with filters configured, or git failed). "
+            "Nothing was sent. Run from a normal checkout, or set GEMINI4_INCLUDE_IGNORED=1 to read without "
+            ".gitignore filtering.")
+    return False
+
+
 # Dependency and cache directories that are never project source, even when committed. Other
 # IGNORE_DIRS entries (build, dist, vendor, ...) are kept when git tracks them, at low priority:
 # some projects keep real source in build/, and git's ignore rules already drop build output.
@@ -551,8 +581,11 @@ def _git_tracked_ignored(root: Path) -> set:
 def _git_ignored(root: Path, rels: List[str]) -> set:
     """Subset of `rels` that git ignores. Ignored files often hold local secrets, so they are skipped
     even when named explicitly, unless GEMINI4_INCLUDE_IGNORED=1."""
-    if not rels or _env("GEMINI4_INCLUDE_IGNORED") == "1" or not _in_git_repo(root):
+    if not rels or _env("GEMINI4_INCLUDE_IGNORED") == "1":
         return set()
+    if not _in_git_repo(root):
+        # Not a git working tree: nothing is ignored. Meant to be one but unusable: treat everything as ignored.
+        return set(rels) if _has_git_marker(root) else set()
     git = shutil.which("git")
     if not git:
         return set()
@@ -720,7 +753,7 @@ def collect_files(
     if not paths:
         raise ToolError("`paths` is empty. Pass workspace-relative files, directories, or globs.")
 
-    use_git = _in_git_repo(root)
+    use_git = _require_safe_git_or_plain(root)
     candidates: List[Path] = []
     explicit: List[Path] = []
     rejected: List[str] = []
@@ -2256,15 +2289,40 @@ def fetch_spec_url(url: str) -> Tuple[bytes, str]:
     return body, ctype or "text/plain"
 
 
-_TAG_RE = re.compile(r"<(script|style)\b.*?</\1\s*>|<[^>]{0,2000}>", re.I | re.S)
+class _TextExtractor(html.parser.HTMLParser):
+    """Linear-time visible-text extraction; script and style contents are dropped."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: List[str] = []
+        self._skip = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("script", "style", "noscript"):
+            self._skip += 1
+        elif tag in ("p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "pre", "section"):
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in ("script", "style", "noscript") and self._skip:
+            self._skip -= 1
+
+    def handle_data(self, data):
+        if not self._skip:
+            self.parts.append(data)
 
 
 def _html_to_text(text: str) -> str:
     if "<" not in text:
         return text
-    text = _TAG_RE.sub(" ", text)
-    text = html.unescape(text)
-    return re.sub(r"[ \t]*\n\s*\n\s*", "\n\n", re.sub(r"[ \t]{2,}", " ", text)).strip()
+    parser = _TextExtractor()
+    try:
+        parser.feed(text)
+        parser.close()
+    except Exception:  # malformed markup: fall back to the raw text rather than failing the check
+        return text
+    out = "".join(parser.parts)
+    return re.sub(r"\n[ \t\n]*\n", "\n\n", re.sub(r"[ \t]+", " ", out)).strip()
 
 
 def execute_tool(name: str, args: Dict[str, Any]) -> str:

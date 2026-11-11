@@ -1073,6 +1073,33 @@ class SecurityAuditFindingsTests(Workspace):
             self.assertTrue(srv._is_agent_config(rel), rel)
         self.assertFalse(srv._is_agent_config("src/app.py"))
 
+    def test_unusable_git_fails_closed_instead_of_ignoring_gitignore(self):
+        victim = Path(tempfile.mkdtemp()).resolve()
+        subprocess.run(["git", "init", "-q"], cwd=victim, check=True)
+        attacker = Path(tempfile.mkdtemp()).resolve()
+        (attacker / ".git").write_text(f"gitdir: {victim}/.git\n")
+        (attacker / "local.yml").write_text("token: ignored-canary\n")
+        with self.assertRaises(srv.ToolError):
+            srv.collect_files(["."], attacker)
+        self.assertEqual(srv._git_ignored(attacker, ["local.yml"]), {"local.yml"})
+        plain = Path(tempfile.mkdtemp()).resolve()  # no .git anywhere: a plain folder still works
+        (plain / "a.py").write_text("x = 1\n")
+        _, meta = srv.collect_files(["."], plain)
+        self.assertEqual(meta["files"], ["a.py"])
+
+    def test_html_to_text_is_linear_and_drops_scripts(self):
+        import time as _t
+        hostile = "<script" * 200_000 + "x"
+        t0 = _t.time()
+        srv._html_to_text(hostile)
+        self.assertLess(_t.time() - t0, 5)
+        page = "<html><head><style>p{}</style><script>var s='<b>x</b>';</script></head><body><h1>Title</h1><p>Body &amp; text</p></body></html>"
+        out = srv._html_to_text(page)
+        self.assertIn("Title", out)
+        self.assertIn("Body & text", out)
+        self.assertNotIn("var s", out)
+        self.assertNotIn("p{}", out)
+
     def test_top_level_and_home_parent_roots_are_refused(self):
         for raw in ("/tmp", str(Path.home().parent)):
             with mock.patch.dict(os.environ, {"GEMINI4_WORKSPACE_ROOT": raw}):

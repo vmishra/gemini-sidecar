@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.4.2 (2026-11-11)
+
+### Security
+- File collection fails closed when a folder is inside a git working tree but git cannot be used safely: a `.git` file that points elsewhere, git older than 2.31 with filters configured, or a failing git. Previously it walked the folder without `.gitignore` filtering, which could pick up a user's ignored local files. The ignore check treats every file as ignored in that case. Set `GEMINI4_INCLUDE_IGNORED=1` to read anyway.
+- Spec pages are reduced to text with the standard library's HTML parser instead of a regular expression that could take quadratic time on a hostile page.
+
+### Added
+- [docs/benchmarks.md](docs/benchmarks.md): Google's published Gemini 4 Carbon results, and measured runs of six sidecar commands on Carbon and on the previous Pro model, with the method.
+- README: measured table updated with Carbon runs, and all costs at Vertex AI list prices.
+
 ## 2.4.1 (2026-11-11)
 
 ### Security

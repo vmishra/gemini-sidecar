@@ -69,7 +69,7 @@ The prefix is optional when nothing else uses the name, so `/analyze` works. Kee
 
 ## See it work
 
-Every replay below is a real run, trimmed to fit.
+Every replay below is a real run, trimmed to fit. The audit and refactor replays were recorded on `gemini-4-argon`, the Pro model before 2.4.0. For measured Carbon runs of the same commands, see [Benchmarks](./docs/benchmarks.md).
 
 **Security audit.** Pointed at this repository's own code, it found six real issues that two earlier code reviews had missed. All six are fixed in [`038b827`](../../commit/038b827).
 
@@ -172,25 +172,31 @@ Gemini is a second pair of hands, not a replacement for your agent's own judgeme
 
 ## Measured, not estimated
 
-Each run was made on 3 and 4 November 2026 against Vertex AI. Costs use November 2026 list prices.
+Real runs against Vertex AI. Costs are at Vertex AI global list prices; Google's introductory pricing halves the Gemini rows through the end of November (Carbon) and December (Flash).
 
 | Run | Model | Read | Answer | Time | Cost |
 |---|---|---:|---:|---:|---:|
-| `/gemini:analyze`, this whole repository (39 files) | `gemini-3.8-flash` | 103,003 tok | 1,958 tok | 16.5 s | $0.085 |
-| Follow-up question, same files | `gemini-3.8-flash` | 102,988 tok | 573 tok | 8.0 s | $0.079 |
-| `/gemini:security-audit`, 3 core files (~3,100 lines) | `gemini-4-argon` | 57,896 tok | 32,223 tok\* | 391 s | $0.44 |
-| `/gemini:refactor` with tests, small project | `gemini-4-argon` | 384 tok | 2,817 tok | 45 s | $0.029 |
-| `/gemini:review --fast`, one uncommitted change | `gemini-3.8-flash` | 280 tok | 1,984 tok | 16 s | $0.008 |
-| `/gemini:test-triage`, 30,006-line log, one failure mid-file | `gemini-3.8-flash` | 21,071 tok | 3,703 tok | 26 s | $0.030 |
-| `/gemini:deps`, two pinned packages, with Google Search | `gemini-3.8-flash` | 300 tok | 4,027 tok | 42 s | $0.015 + search |
-| `/gemini:spec-check`, PDF spec vs. one module | `gemini-4-argon` | 961 tok | 1,944 tok | 29 s | $0.021 |
-| `/gemini:spec-check`, RFC 6585 by URL (page included) | `gemini-4-argon` | 5,591 tok | 2,794 tok | 40 s | $0.039 |
-| `/gemini:see`, one screenshot + 2 source files | `gemini-3.8-flash` | 1,518 tok | 786 tok | 6.4 s | $0.004 |
-| `/gemini:map`, small project | `gemini-4-argon` | 940 tok | 3,257 tok | 52 s | $0.035 |
+| `/gemini:analyze`, this whole repository (39 files) | `gemini-3.8-flash` | 103,003 tok | 1,958 tok | 16.5 s | $0.170 |
+| Follow-up question, same files | `gemini-3.8-flash` | 102,988 tok | 573 tok | 8.0 s | $0.158 |
+| `/gemini:analyze --deep`, 106 files of a web app | `gemini-4-carbon` | 258,868 tok | 3,983 tok | 65 s | $1.12 |
+| `/gemini:security-audit`, 3 files (4,278 lines) | `gemini-4-carbon` | 196,228 tok\* | 43,484 tok\*\* | 516 s | $1.66 |
+| `/gemini:review`, a diff with 2 planted bugs (both caught) | `gemini-4-carbon` | 1,226 tok | 968 tok | 21 s | $0.024 |
+| `/gemini:review --fast`, one uncommitted change | `gemini-3.8-flash` | 280 tok | 1,984 tok | 16 s | $0.016 |
+| `/gemini:refactor`, a 2-file feature | `gemini-4-carbon` | 48,458 tok\* | 37,649 tok\*\* | 624 s | $0.95 |
+| `/gemini:spec-check`, RFC 6585 by URL | `gemini-4-carbon` | 62,916 tok | 17,617 tok\*\* | 322 s | $0.49 |
+| `/gemini:map`, two directories | `gemini-4-carbon` | 53,363 tok | 7,067 tok | 127 s | $0.36 |
+| `/gemini:test-triage`, 30,006-line log, one failure mid-file | `gemini-3.8-flash` | 21,071 tok | 3,703 tok | 26 s | $0.060 |
+| `/gemini:deps`, two pinned packages, with Google Search | `gemini-3.8-flash` | 300 tok | 4,027 tok | 42 s | $0.030 + search |
+| `/gemini:see`, one screenshot + 2 source files | `gemini-3.8-flash` | 1,518 tok | 786 tok | 6.4 s | $0.008 |
 
-\*Mostly reasoning. Audits and refactors on `gemini-4-argon` think hard and can take minutes; analysis and triage on Flash take seconds. `/gemini:status` reports the same figures for your own session.
+\*Includes re-reads. Carbon writes long answers in segments, and each segment re-reads the prompt.
+\*\*Mostly reasoning.
+
+Flash rows were measured on 3–4 November 2026, Carbon rows on 11 November 2026. Analysis, triage and reviews take seconds. Audits, refactors and spec checks on Carbon take minutes, so start them and keep working. `/gemini:status` reports the same figures for your own session.
 
 The triage row shows the log digest at work. Only 766 of the 30,006 lines were sent: every failure, traceback and `file:line`, plus the end of the log, with dropped ranges marked.
+
+**Benchmarks.** Carbon against the previous Pro model on the same six tasks, and Google's published Carbon results: [docs/benchmarks.md](./docs/benchmarks.md).
 
 ## Codex CLI and Cursor
 
@@ -210,27 +216,30 @@ Then ask in plain language, for example "run gemini4_security_audit on src/auth"
 
 ## Pricing
 
-November 2026 list prices, USD per 1M tokens:
+Vertex AI global list prices, USD per 1M tokens, from the Cloud Billing catalog (November 2026):
 
 | Model | Input | Cached input | Output (incl. thinking) | Used for |
 |---|---:|---:|---:|---|
-| `gemini-4-carbon` | $2.00 | $0.10 | $10.00 | audits, reviews, refactors, spec checks, `--deep` |
-| `gemini-3.8-flash` | $0.75 | $0.075 | $3.75 | analysis, triage, deps, see, subagents |
-| `gemini-3.5-flash-lite` | $0.30 | $0.03 | $2.50 | gateway background calls |
+| `gemini-4-carbon` | $4.00 | $0.20 | $20.00 | audits, reviews, refactors, spec checks, `--deep` |
+| `gemini-3.8-flash` | $1.50 | $0.15 | $7.50 | analysis, triage, deps, see, subagents |
+| `gemini-3.5-flash-lite` | $0.30 | $0.03 | $2.50 | `analyze --fast`, gateway background calls |
 | `claude-opus-5-5`, for comparison | $4.00 | $0.20 (writes $5.00) | $20.00 | |
 
-Scheduled changes:
-- `gemini-4-carbon` moves to $4 / $0.20 / $20 on 1 Dec 2026.
-- `gemini-3.8-flash` moves to $1.50 / $0.15 / $7.50 on 1 Jan 2027.
+Introductory pricing:
+- Google bills `gemini-4-carbon` at $2 / $0.10 / $10 through 30 Nov 2026.
+- `gemini-3.8-flash` is $0.75 / $0.075 / $3.75 through 31 Dec 2026.
 
-Google Search grounding, used by `/gemini:deps`, is free for 5,000 requests a month on paid plans, then $14 per 1,000. It isn't available on the free tier. A page read by `/gemini:spec-check` is billed as input tokens, and the reported costs include it. Caching is automatic for repeated prefixes of at least 4,096 tokens on Carbon (6,144 on Vertex AI) and 1,024 on Flash, but hits aren't guaranteed.
+The plugin reports costs at the list prices above, so its figures are an upper bound until then. Override them with `GEMINI4_PRICES_JSON`.
 
-Sources: [Gemini API pricing](https://aistudio.google.com/docs/pricing), [Gemini 4 Carbon availability](https://blog.google/innovation-and-ai/models-and-research/gemini-models/gemini-4-carbon-now-available/), [Claude pricing](https://platform.claude.com/docs/en/about-claude/pricing), [caching minimums](https://firebase.google.com/docs/ai-logic/context-caching).
+Google Search grounding, used by `/gemini:deps`, is free for 5,000 requests a month on paid plans, then $14 per 1,000. Caching is automatic for repeated prefixes of at least 6,144 tokens on Carbon on Vertex AI (4,096 on the Gemini API) and 1,024 on Flash, but hits aren't guaranteed.
+
+Sources: [Vertex AI pricing](https://cloud.google.com/vertex-ai/generative-ai/pricing), [Gemini API pricing](https://aistudio.google.com/docs/pricing), [Gemini 4 Carbon availability](https://blog.google/innovation-and-ai/models-and-research/gemini-models/gemini-4-carbon-now-available/), [caching minimums](https://firebase.google.com/docs/ai-logic/context-caching).
 
 ## More
 
 - [How the gateway works](./docs/gateway.md): run Claude Code's subagents, or the whole session, on Gemini.
 - [Reference](./docs/reference.md): all ten tools, configuration, the cost preview, the optional large-read guard, and troubleshooting.
+- [Benchmarks](./docs/benchmarks.md): Carbon against the previous Pro model on the same tasks, and Google's published Carbon results.
 - [Contributing](./CONTRIBUTING.md), [Security policy](./SECURITY.md) and [Changelog](./CHANGELOG.md).
 
 Licensed under [Apache 2.0](./LICENSE).
