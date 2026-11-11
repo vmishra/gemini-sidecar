@@ -54,7 +54,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Dict, List, Optional, Tuple
 
 SERVER_NAME = "gemini4"
-SERVER_VERSION = "2.4.3"
+SERVER_VERSION = "2.4.4"
 DEFAULT_PROTOCOL_VERSION = "2025-06-18"
 
 _RPC_OUT: BinaryIO = sys.stdout.buffer
@@ -1321,6 +1321,10 @@ def call_gemini(
 
     started = time.time()
     timeout = LONG_DECODE_TIMEOUT_S if long_decode else REQUEST_TIMEOUT_S
+    if long_decode:
+        # Streamed segments carry up to 65,536 output tokens, twice the non-streamed limit, so a long
+        # answer needs half as many continuation hops, and each hop re-reads (and bills) the prompt.
+        url = url.replace(":generateContent", ":streamGenerateContent") + "?alt=sse"
 
     def post(req_body: Dict[str, Any]) -> Dict[str, Any]:
         payload = json.dumps(req_body).encode("utf-8")
@@ -1329,7 +1333,7 @@ def call_gemini(
             req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
             try:
                 with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as resp:
-                    return json.loads(resp.read().decode("utf-8"))
+                    return _parse_generate_response(resp.read().decode("utf-8"))
             except urllib.error.HTTPError as exc:
                 err_body = exc.read().decode("utf-8", errors="replace")
                 last_error = _http_error_message(exc.code, err_body, model)
@@ -1413,6 +1417,39 @@ def call_gemini(
         "cost_usd": estimate_cost(model, usage),
         "latency_s": round(time.time() - started, 1),
     }
+
+
+def _parse_generate_response(raw: str) -> Dict[str, Any]:
+    """Parse a generateContent reply: one JSON object, or a server-sent-event stream of chunks
+    (streamGenerateContent?alt=sse), merged into the shape of a single reply."""
+    text = raw.lstrip()
+    if text.startswith("{"):
+        return json.loads(text)
+    merged: Dict[str, Any] = {"candidates": [{"content": {"parts": []}}]}
+    cand = merged["candidates"][0]
+    for line in raw.splitlines():
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if not payload or payload == "[DONE]":
+            continue
+        chunk = json.loads(payload)
+        if isinstance(chunk, list):  # some proxies send a JSON array of chunks
+            chunk = chunk[0] if chunk else {}
+        if chunk.get("error"):
+            err = chunk["error"]
+            raise ToolError(f"Gemini API error during streaming: {str(err.get('message', err))[:300]}")
+        for c in chunk.get("candidates") or []:
+            cand["content"]["parts"].extend((c.get("content") or {}).get("parts") or [])
+            for key in ("finishReason", "continuationToken", "groundingMetadata"):
+                if c.get(key):
+                    cand[key] = c[key]
+        for key in ("usageMetadata", "continuationToken", "promptFeedback", "modelVersion"):
+            if chunk.get(key):
+                merged[key] = chunk[key]
+    if not cand["content"]["parts"] and "finishReason" not in cand and "promptFeedback" in merged:
+        merged["candidates"] = []
+    return merged
 
 
 DEPS_BATCH_SIZE = 12

@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.4.4 (2026-11-11)
+
+### Performance
+- `gemini-4-carbon` calls are streamed (`streamGenerateContent`). A streamed segment carries up to 65,536 output tokens, twice the non-streamed limit, so long answers need half as many continuation hops. Each hop re-reads the prompt and is billed for it. On a measured 2-file refactor, input fell from 48,458 to 7,845 tokens, time from 624 s to 497 s, and cost from $0.95 to $0.69 at Vertex list price.
+
 ## 2.4.3 (2026-11-11)
 
 ### Changed
