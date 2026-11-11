@@ -10,7 +10,7 @@
 | `gemini4_long_decode_refactor` | Writes complete files to `.gemini4-staging/` (`mode`: refactor, tests, docs, architecture) | `gemini-4-carbon`, up to 65,536 output tokens |
 | `gemini4_triage_failures` | Root-causes failures from a saved log plus source files | `gemini-3.8-flash` |
 | `gemini4_check_dependencies` | Checks manifests against live Google Search results: latest versions, CVEs, breaking changes, with sources | `gemini-3.8-flash` + Google Search grounding |
-| `gemini4_spec_check` | Checks code against a PDF/Markdown/text spec in the repo or a URL, requirement by requirement | `gemini-4-carbon` (URL context tool for URLs) |
+| `gemini4_spec_check` | Checks code against a PDF/Markdown/text spec in the repo or a URL, requirement by requirement | `gemini-4-carbon` (the server fetches URL specs itself: https and public hosts only, on every redirect) |
 | `gemini4_visual_debug` | Screenshots or screen recordings plus source code: what is wrong on screen and which lines cause it | `gemini-3.8-flash` |
 | `ask_antigravity` | Independent critique; uses `agy` in read-only plan mode when enabled | `gemini-4-carbon` |
 | `gemini4_status` | Configuration, token usage and cost for the session | none |

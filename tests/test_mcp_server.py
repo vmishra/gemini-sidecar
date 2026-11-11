@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.request as urllib_request
 from pathlib import Path
 from unittest import mock
 
@@ -300,9 +301,17 @@ class GeminiCallTests(Workspace):
         status = srv.tool_status()
         self.assertIn("| `gemini-4-carbon` | 1 | 1,000 | 400 | 70 |", status)
 
+    def test_carbon_uses_medium_thinking_for_reviews_and_high_for_audits(self):
+        self.assertEqual(srv.MODEL_PRO, "gemini-4-carbon")
+        self.assertEqual(srv.PRO_DEEP_THINKING, "medium")
+        src = SERVER.read_text()
+        self.assertIn('SYS_SECURITY, prompt, thinking_level="high"', src)
+        for sys_name in ("SYS_REVIEW", "SYS_GENERATE", "SYS_SPEC"):
+            self.assertIn(f"{sys_name}, prompt, thinking_level=PRO_DEEP_THINKING", src)
+
     def test_cost_uses_cached_rate(self):
         usage = {"promptTokenCount": 1_000_000, "cachedContentTokenCount": 1_000_000, "candidatesTokenCount": 0}
-        self.assertAlmostEqual(srv.estimate_cost("gemini-3.8-flash", usage), 0.075)
+        self.assertAlmostEqual(srv.estimate_cost("gemini-3.8-flash", usage), 0.15)  # Vertex cached rate
 
     def test_no_credentials_is_an_error(self):
         res = srv.handle_request({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
@@ -423,11 +432,16 @@ class GeminiStrengthToolTests(Workspace):
         self.assertEqual(part["mimeType"], "application/pdf")
         self.assertNotIn("tools", body)
 
-    def test_spec_check_url_uses_url_context(self):
-        res, body = self.call("gemini4_spec_check", {"spec": "https://www.rfc-editor.org/rfc/rfc6585", "paths": ["src/"]})
+    def test_spec_check_url_is_fetched_by_the_server_not_by_gemini(self):
+        page = b"<html><body><h1>RFC 6585</h1><p>429 Too Many Requests MUST include Retry-After.</p></body></html>"
+        with mock.patch.object(srv, "fetch_spec_url", return_value=(page, "text/html")) as fetch:
+            res, body = self.call("gemini4_spec_check", {"spec": "https://www.rfc-editor.org/rfc/rfc6585", "paths": ["src/"]})
         self.assertFalse(res["isError"])
-        self.assertEqual(body["tools"], [{"urlContext": {}}])
-        self.assertIn("rfc6585", body["contents"][0]["parts"][-1]["text"])
+        fetch.assert_called_once_with("https://www.rfc-editor.org/rfc/rfc6585")
+        self.assertNotIn("tools", body)  # no fetch tool in a call that also carries workspace code
+        text = body["contents"][0]["parts"][-1]["text"]
+        self.assertIn("429 Too Many Requests MUST include Retry-After", text)
+        self.assertNotIn("<h1>", text)
 
     def test_spec_check_text_spec_is_read_as_text(self):
         (self.root / "SPEC.md").write_text("The API MUST return 429.\n")
@@ -992,6 +1006,78 @@ class LongDecodeTests(unittest.TestCase):
              mock.patch.object(srv.urllib.request, "urlopen", return_value=continuation_reply("ok", finish="STOP")) as op:
             srv.call_gemini("gemini-4-carbon", "sys", "prompt")
         self.assertIn("/v1beta1/projects/my-proj-123/", op.call_args[0][0].full_url)
+
+
+class SecurityAuditFindingsTests(Workspace):
+    """Regression tests for issues found by the November 2026 model benchmark audits."""
+
+    def test_filter_driver_name_with_equals_cannot_run(self):
+        payload = Path(tempfile.mkdtemp()) / "evil.sh"
+        marker = self.root / "PWNED"
+        payload.write_text(f"#!/bin/sh\ntouch {marker}\ncat\n")
+        payload.chmod(0o755)
+        with open(self.root / ".git" / "config", "a") as fh:
+            fh.write(f'[filter "x=y"]\n\tclean = {payload}\n')
+        (self.root / ".gitattributes").write_text("*.py filter=x=y\n")
+        (self.root / "src" / "app.py").write_text("def add(a, b):\n    return a - b\n")
+        out = srv._git(self.root, "diff", "--no-ext-diff", "--no-textconv", "--text", "HEAD", "--", "src/app.py")
+        self.assertFalse(marker.exists(), "repository-defined filter ran")
+        self.assertIn("a - b", out or "")
+
+    def test_workspace_root_cannot_point_into_git_or_secret_dirs(self):
+        (self.root / ".ssh").mkdir()
+        for bad in (".git", ".git/refs", ".ssh"):
+            with self.assertRaises(srv.ToolError):
+                srv.resolve_workspace(bad)
+        self.assertEqual(srv.resolve_workspace("src"), (self.root / "src").resolve())
+
+    def test_git_file_pointing_at_another_repo_is_not_trusted(self):
+        victim = Path(tempfile.mkdtemp()).resolve()
+        subprocess.run(["git", "init", "-q"], cwd=victim, check=True)
+        (victim / "private.py").write_text("VICTIM-PRIVATE-CODE\n")
+        subprocess.run(["git", "add", "-A"], cwd=victim, check=True)
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "v"], cwd=victim, check=True)
+        attacker = Path(tempfile.mkdtemp()).resolve()
+        (attacker / ".git").write_text(f"gitdir: {victim}/.git\n")
+        self.assertFalse(srv._in_git_repo(attacker))
+        self.assertTrue(srv._in_git_repo(self.root))
+
+    def test_linked_worktree_is_still_trusted(self):
+        wt = Path(tempfile.mkdtemp()).resolve() / "wt"
+        subprocess.run(["git", "worktree", "add", "-q", str(wt)], cwd=self.root, check=True, capture_output=True)
+        self.assertTrue(srv._in_git_repo(wt))
+
+    def test_spec_fetch_refuses_private_hosts_http_and_credentials(self):
+        for url in ("http://example.com/spec", "https://user:pw@example.com/spec", "https://localhost/spec",
+                    "https://127.0.0.1/spec", "https://169.254.169.254/computeMetadata/v1/", "https://10.0.0.5/x"):
+            with self.assertRaises(srv.ToolError, msg=url):
+                srv.fetch_spec_url(url)
+
+    def test_spec_redirect_to_private_host_is_refused(self):
+        handler = srv._CheckedRedirect()
+        req = urllib_request.Request("https://example.com/spec")
+        for target in ("http://example.com/x", "https://169.254.169.254/computeMetadata/v1/", "https://127.0.0.1/x"):
+            with self.assertRaises(srv.ToolError, msg=target):
+                handler.redirect_request(req, None, 302, "Found", {}, target)
+
+    def test_ignored_logs_need_a_log_suffix(self):
+        (self.root / ".gitignore").write_text("*.log\nlocal.yml\n")
+        (self.root / "local.yml").write_text("token: abc\n")
+        (self.root / "test.log").write_text("FAILED x\n")
+        srv.read_log_digest("test.log", self.root, 10_000)
+        with self.assertRaises(srv.ToolError):
+            srv.read_log_digest("local.yml", self.root, 10_000)
+
+    def test_agent_config_is_never_copied_for_antigravity(self):
+        for rel in (".gemini/settings.json", ".claude/settings.json", ".mcp.json", "AGENTS.md", ".vscode/tasks.json"):
+            self.assertTrue(srv._is_agent_config(rel), rel)
+        self.assertFalse(srv._is_agent_config("src/app.py"))
+
+    def test_top_level_and_home_parent_roots_are_refused(self):
+        for raw in ("/tmp", str(Path.home().parent)):
+            with mock.patch.dict(os.environ, {"GEMINI4_WORKSPACE_ROOT": raw}):
+                with self.assertRaises(srv.ToolError, msg=raw):
+                    srv.workspace_root()
 
 
 if __name__ == "__main__":

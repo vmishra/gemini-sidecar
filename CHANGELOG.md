@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.4.1 (2026-11-11)
+
+### Security
+These issues were found by the security audits in our model benchmark. Each was reproduced with a proof of concept before it was fixed, and each fix has a regression test.
+- **Code execution from a hostile repository (high).** A repository could define a git filter driver whose name contains `=`. The neutralising `-c filter.<name>.clean=cat` was split by git at the first `=`, so the repository's own filter stayed active and ran during `/gemini:review`. Overrides now go through `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n`, which keep key and value apart. If git is older than 2.31, the server refuses to run git rather than risk it. Reported by all four models in the benchmark.
+- **Credential disclosure through `workspace_root` (high).** A narrowed root such as `.git`, `.ssh` or `.aws` made files inside it look ordinary, so `.git/config` could be sent, including any credentials embedded in a remote URL. A narrowed root may no longer sit inside a git or credential directory.
+- **Another repository's code disclosed through a `.git` file (high).** A folder containing `.git` as a file (`gitdir: /path/to/other-repo/.git`) made `/gemini:review` diff and send that other repository. A git directory is now trusted only when it lies inside the working tree, or is a linked worktree or submodule that points back to it.
+- **Spec URLs are fetched by the server.** Previously Gemini fetched the page with its URL context tool, in the same call as the workspace code. The server now fetches the page itself (`https` only, public addresses only, every redirect re-checked, size-capped) and no fetch tool is enabled.
+- **Antigravity hand-off.** Agent and tool configuration (`.gemini/`, `.claude/`, `.mcp.json`, `AGENTS.md` and similar) is never copied into the temporary directory `agy` runs in. The prompt passed to `agy` is redacted like every other prompt.
+- **Test logs.** `/gemini:test-triage` applies the same checks as file reads: regular files only, nothing inside a git directory, and a git-ignored file only if it has a log suffix.
+- **Workspace roots.** Parents of the home directory, top-level directories and shared temp directories are refused, as well as `/` and the home directory itself.
+
+### Changed
+- Thinking level on `gemini-4-carbon`: `medium` for reviews, refactors, maps and spec checks, `high` for security audits. In measured runs, Carbon at medium reviewed the planted-bug diff in 21 s (232 s at high) and finished the RFC spec check in 5 minutes (21 at high).
+- Cost reports, gateway budget caps and docs use Vertex AI global list prices from the Cloud Billing catalog: `gemini-4-carbon` $4 / $0.20 / $20, `gemini-3.8-flash` $1.50 / $0.15 / $7.50, `gemini-3.5-flash-lite` $0.30 / $0.03 / $2.50 per 1M tokens. Google's introductory pricing halves Carbon through 30 November 2026 and Flash through 31 December 2026, so reported costs are an upper bound until then. Gateway: the `claude-opus-5-5` cache-read price is now $0.20.
+
 ## 2.4.0 (2026-11-11)
 
 ### Changed

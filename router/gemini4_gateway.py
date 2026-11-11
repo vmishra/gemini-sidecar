@@ -173,15 +173,15 @@ RISK_WORDS_RE = re.compile(
 )
 
 # USD per 1M tokens: (input, cached input, output). Used for local budget estimates only.
-# gemini-4-carbon list price rises to 4.00 / 0.20 / 20.00 on 2026-12-01.
-# gemini-3.8-flash prices are promotional through 2026-12-31.
-# Override with GEMINI4_PRICES_JSON='{"model": [in, cached, out]}'.
+# Vertex AI global list prices from the Cloud Billing catalog (November 2026). Google's introductory
+# pricing bills gemini-4-carbon at half through 2026-11-30 and gemini-3.8-flash through 2026-12-31,
+# so these caps err on the high side. Override with GEMINI4_PRICES_JSON='{"model": [in, cached, out]}'.
 DEFAULT_PRICES_PER_MTOK: Dict[str, Tuple[float, float, float]] = {
-    "gemini-4-carbon": (2.00, 0.10, 10.00),
-    "gemini-3.8-flash": (0.75, 0.075, 3.75),
+    "gemini-4-carbon": (4.00, 0.20, 20.00),
+    "gemini-3.8-flash": (1.50, 0.15, 7.50),
     "gemini-3.5-flash-lite": (0.30, 0.03, 2.50),
-    "gemini-4-argon": (2.00, 0.10, 10.00),
-    "claude-opus-5-5": (4.00, 0.40, 20.00),
+    "gemini-4-argon": (4.00, 0.20, 20.00),
+    "claude-opus-5-5": (4.00, 0.20, 20.00),
     "claude-sonnet-5-5": (2.00, 0.20, 10.00),
 }
 # Applied to models missing from the table so that caps err on the high side.

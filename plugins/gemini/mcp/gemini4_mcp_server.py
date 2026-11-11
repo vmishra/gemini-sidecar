@@ -29,12 +29,16 @@ Backends (first match wins):
 
 from __future__ import annotations
 
+import base64
 import difflib
 import fnmatch
+import html
+import ipaddress
 import json
 import os
 import re
 import shutil
+import socket
 import ssl
 import stat
 import tempfile
@@ -49,7 +53,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Dict, List, Optional, Tuple
 
 SERVER_NAME = "gemini4"
-SERVER_VERSION = "2.4.0"
+SERVER_VERSION = "2.4.1"
 DEFAULT_PROTOCOL_VERSION = "2025-06-18"
 
 _RPC_OUT: BinaryIO = sys.stdout.buffer
@@ -123,15 +127,21 @@ REQUEST_TIMEOUT_S = _env_int("GEMINI4_REQUEST_TIMEOUT", 900)
 LONG_DECODE_MODELS = {"gemini-4-carbon"}
 LONG_DECODE_TIMEOUT_S = _env_int("GEMINI4_LONG_DECODE_TIMEOUT", 1260)
 MAX_CONTINUATIONS = _env_int("GEMINI4_MAX_CONTINUATIONS", 8)
+# Thinking level for reviews, refactors, maps and spec checks. Carbon at medium matched or beat the
+# previous model's high-thinking results on these tasks in measured runs, at a fraction of the time
+# (review 21 s against 232 s at high; spec check 5 min against 21 min). Audits keep high thinking.
+PRO_DEEP_THINKING = "medium" if MODEL_PRO in LONG_DECODE_MODELS else "high"
 STAGING_DIRNAME = ".gemini4-staging"
 
-# USD per 1M tokens: (input, cached input, output). Thinking tokens bill as output.
+# USD per 1M tokens: (input, cached input, output), Vertex AI global list prices from the Cloud
+# Billing catalog (November 2026). Google's introductory pricing bills gemini-4-carbon at half these
+# rates through 2026-11-30 and gemini-3.8-flash through 2026-12-31. Thinking tokens bill as output.
 # Override with GEMINI4_PRICES_JSON='{"model": [in, cached, out], ...}'.
 DEFAULT_PRICES: Dict[str, Tuple[float, float, float]] = {
-    "gemini-4-carbon": (2.00, 0.10, 10.00),
-    "gemini-3.8-flash": (0.75, 0.075, 3.75),
+    "gemini-4-carbon": (4.00, 0.20, 20.00),
+    "gemini-3.8-flash": (1.50, 0.15, 7.50),
     "gemini-3.5-flash-lite": (0.30, 0.03, 2.50),
-    "gemini-4-argon": (2.00, 0.10, 10.00),  # previous default; kept so a pinned model still reports cost
+    "gemini-4-argon": (4.00, 0.20, 20.00),  # previous default; kept so a pinned model still reports cost
 }
 
 # --------------------------------------------------------------------------- #
@@ -205,7 +215,12 @@ class ToolError(Exception):
 def workspace_root() -> Path:
     raw = _env("GEMINI4_WORKSPACE_ROOT", "CLAUDE_PROJECT_DIR") or os.getcwd()
     root = Path(raw).expanduser().resolve()
-    if root == Path(root.anchor) or root == Path.home().resolve():
+    home = Path.home().resolve()
+    # Refuse the filesystem root, the home directory, any directory that contains the home directory
+    # (/Users, /home) and any top-level directory (/tmp, /opt): each would expose far more than a project.
+    shared_tmp = {Path(t).resolve() for t in (tempfile.gettempdir(), "/tmp", "/var/tmp")}
+    if (root == Path(root.anchor) or root == home or _is_within(home, root) or len(root.parts) <= 2
+            or root in shared_tmp):
         raise ToolError(
             f"Refusing to use '{root}' as the workspace root (it would expose your whole disk or home "
             "directory). Start the harness from a project directory or set GEMINI4_WORKSPACE_ROOT."
@@ -225,6 +240,10 @@ def resolve_workspace(arg: Optional[str]) -> Path:
             f"workspace_root '{arg}' is outside the workspace '{root}'. "
             "Set GEMINI4_WORKSPACE_ROOT to widen the allowed root."
         )
+    # Narrowing the root must not step into a credential or git directory: every later check is relative
+    # to the narrowed root, so `.git` or `.ssh` as the root would make their contents look ordinary.
+    if cand != root and (_has_git_segment(cand.relative_to(root).parts) or _inside_git_dir(cand, root)):
+        raise ToolError(f"workspace_root '{arg}' is inside a credential or git directory.")
     return cand
 
 
@@ -368,7 +387,8 @@ _GIT_SAFE_CONFIG = [
     "-c", "core.pager=cat", "-c", "safe.bareRepository=explicit", "-c", "core.untrackedCache=false",
     "-c", "protocol.allow=never", "-c", "core.sshCommand=false",
 ]
-_GIT_FILTER_KEY = re.compile(r"^filter\.(.+)\.(?:clean|smudge|process)$", re.I)
+_GIT_FILTER_KEY = re.compile(r"^filter\.(.+)\.(?:clean|smudge|process)$", re.I | re.S)
+_GIT_VERSION: Optional[Tuple[int, int]] = None
 
 
 def _git_env() -> Dict[str, str]:
@@ -378,41 +398,108 @@ def _git_env() -> Dict[str, str]:
     return env
 
 
-def _git_filter_overrides(git: str, root: Path) -> List[str]:
-    """Neutralise any clean/smudge/process filter drivers the repo (or user config) defines."""
+def _git_version(git: str) -> Tuple[int, int]:
+    global _GIT_VERSION
+    if _GIT_VERSION is None:
+        try:
+            out = subprocess.run([git, "--version"], capture_output=True, text=True, timeout=10,
+                                 check=False, env=_git_env()).stdout
+            m = re.search(r"(\d+)\.(\d+)", out)
+            _GIT_VERSION = (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+        except (OSError, subprocess.SubprocessError):
+            _GIT_VERSION = (0, 0)
+    return _GIT_VERSION
+
+
+def _git_filter_overrides(git: str, root: Path) -> Optional[List[Tuple[str, str]]]:
+    """Config pairs that neutralise every clean/smudge/process filter driver the repo (or user config)
+    defines. None means the repo could not be checked; the caller must not run git.
+
+    Driver names are attacker-controlled and may contain `=`, so the pairs are passed through
+    GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n, which keep key and value apart, never through `-c key=value`,
+    which git splits at the first `=`."""
     try:
-        proc = subprocess.run([git, *_GIT_SAFE_CONFIG, "-C", str(root), "config", "--list", "--name-only"],
-                              capture_output=True, text=True, timeout=10, check=False, env=_git_env())
+        proc = subprocess.run([git, *_GIT_SAFE_CONFIG, "-C", str(root), "config", "--list", "--name-only", "-z"],
+                              capture_output=True, text=True, errors="replace", timeout=10, check=False,
+                              env=_git_env())
     except (OSError, subprocess.SubprocessError):
-        return []
+        return None
     names = set()
-    for key in proc.stdout.splitlines():
-        m = _GIT_FILTER_KEY.match(key.strip())
+    for key in proc.stdout.split("\0"):
+        m = _GIT_FILTER_KEY.match(key.strip("\n"))
         if m:
             names.add(m.group(1))
-    out: List[str] = []
+    pairs: List[Tuple[str, str]] = []
     for name in sorted(names):
-        out += ["-c", f"filter.{name}.process=", "-c", f"filter.{name}.clean=cat",
-                "-c", f"filter.{name}.smudge=cat", "-c", f"filter.{name}.required=false"]
-    return out
+        pairs += [(f"filter.{name}.process", ""), (f"filter.{name}.clean", "cat"),
+                  (f"filter.{name}.smudge", "cat"), (f"filter.{name}.required", "false")]
+    return pairs
 
 
 def _git(root: Path, *args: str, timeout: int = 30) -> Optional[str]:
     git = shutil.which("git")
     if not git:
         return None
+    overrides = _git_filter_overrides(git, root)
+    if overrides is None:
+        return None
+    env = _git_env()
+    if overrides:
+        if _git_version(git) < (2, 31):  # GIT_CONFIG_COUNT arrived in git 2.31; refuse rather than risk it
+            return None
+        env["GIT_CONFIG_COUNT"] = str(len(overrides))
+        for i, (key, value) in enumerate(overrides):
+            env[f"GIT_CONFIG_KEY_{i}"] = key
+            env[f"GIT_CONFIG_VALUE_{i}"] = value
     try:
-        cmd = [git, *_GIT_SAFE_CONFIG, *_git_filter_overrides(git, root), "-C", str(root), *args]
+        cmd = [git, *_GIT_SAFE_CONFIG, "-C", str(root), *args]
         proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=timeout,
-                              check=False, env=_git_env())
+                              check=False, env=env)
     except (OSError, subprocess.SubprocessError):
         return None
     return proc.stdout if proc.returncode == 0 else None
 
 
+def _git_dir_trusted(root: Path) -> bool:
+    """True when the repository's git directory belongs to this working tree.
+
+    A `.git` *file* can point anywhere (`gitdir: /home/me/other-repo/.git`), which would make git
+    diff and list another repository from inside an untrusted folder. Accept the git directory only
+    when it sits inside the working tree, or when it is a linked worktree or submodule whose git
+    directory points back at this working tree; another repository never points back."""
+    out = _git(root, "rev-parse", "--absolute-git-dir", "--show-toplevel")
+    lines = (out or "").splitlines()
+    if len(lines) < 2:
+        return False
+    try:
+        git_dir, top = Path(lines[0]).resolve(), Path(lines[1]).resolve()
+    except OSError:
+        return False
+    if _is_within(git_dir, top):
+        return True
+    back = git_dir / "gitdir"  # linked worktree: <common>/worktrees/<name>/gitdir -> <worktree>/.git
+    try:
+        if back.is_file():
+            target = Path(back.read_text(encoding="utf-8", errors="replace").strip())
+            target = target if target.is_absolute() else git_dir / target
+            if target.resolve() == (top / ".git").resolve():
+                return True
+    except OSError:
+        return False
+    wt = _git(root, "config", "--get", "core.worktree")  # submodule: <super>/.git/modules/<x> -> worktree
+    if wt and wt.strip():
+        target = Path(wt.strip())
+        target = target if target.is_absolute() else git_dir / target
+        try:
+            return target.resolve() == top
+        except OSError:
+            return False
+    return False
+
+
 def _in_git_repo(root: Path) -> bool:
     out = _git(root, "rev-parse", "--is-inside-work-tree")
-    return bool(out and out.strip() == "true")
+    return bool(out and out.strip() == "true") and _git_dir_trusted(root)
 
 
 # Dependency and cache directories that are never project source, even when committed. Other
@@ -1617,6 +1704,9 @@ LOG_SCAN_CHARS = 2_000  # only the start of each line is scanned, so very long l
 MAX_LOG_BYTES = 50_000_000
 
 
+LOG_SUFFIXES = {".log", ".out", ".txt", ".xml", ".trace", ".err", ".tap"}
+
+
 def read_log_digest(log_rel: str, root: Path, budget: int) -> Tuple[str, str]:
     """A bounded view of a test or build log that keeps the evidence.
 
@@ -1629,8 +1719,15 @@ def read_log_digest(log_rel: str, root: Path, budget: int) -> Tuple[str, str]:
     if not log_rel or rel_path.is_absolute() or ".." in rel_path.parts:
         raise ToolError("`log_path` must be a workspace-relative file path.")
     path = (root / rel_path).resolve()
-    if not _is_within(path, root) or not path.is_file() or is_secret_file(Path(os.path.relpath(path, root))):
-        raise ToolError(f"Log file `{log_rel}` not found inside the workspace (or not allowed).")
+    rel = os.path.relpath(path, root)
+    # Same checks as collect_files: regular file, not secret, not inside a git directory, not git-ignored.
+    if (not _is_within(path, root) or not path.is_file() or not stat.S_ISREG(path.stat().st_mode)
+            or is_secret_file(Path(rel)) or _inside_git_dir(path, root)
+            or (path.suffix.lower() not in LOG_SUFFIXES and _git_ignored(root, [rel]))):
+        # Logs are usually git-ignored, so an ignored file is accepted only if it looks like a log;
+        # an ignored config file (config/local.yml) is not.
+        raise ToolError(f"Log file `{log_rel}` not found inside the workspace (or not allowed). "
+                        f"Git-ignored files are accepted only with a log suffix ({', '.join(sorted(LOG_SUFFIXES))}).")
     size = path.stat().st_size
     with path.open("rb") as fh:
         if size > MAX_LOG_BYTES:
@@ -1739,6 +1836,17 @@ def _agy_env() -> Dict[str, str]:
     return env
 
 
+_AGENT_CONFIG_DIRS = {".gemini", ".agy", ".antigravity", ".claude", ".cursor", ".codex", ".vscode", ".idea",
+                      ".github", ".devcontainer", ".continue", ".windsurf", ".roo", ".clinerules"}
+_AGENT_CONFIG_FILES = {".mcp.json", "mcp.json", "agents.md", "gemini.md", "claude.md", ".cursorrules",
+                       ".windsurfrules", ".clinerules", ".envrc", ".tool-versions"}
+
+
+def _is_agent_config(rel: str) -> bool:
+    parts = [p.lower() for p in Path(rel).parts]
+    return bool(parts) and (any(p in _AGENT_CONFIG_DIRS for p in parts[:-1]) or parts[-1] in _AGENT_CONFIG_FILES)
+
+
 def run_agy_plan(prompt: str, files: List[str], root: Path, model: str, effort: str) -> Tuple[Optional[Dict[str, Any]], str]:
     """Run `agy -p` in plan mode (no edits, no shell commands).
 
@@ -1750,6 +1858,10 @@ def run_agy_plan(prompt: str, files: List[str], root: Path, model: str, effort: 
         return None, ""
     if not agy:
         return None, "Antigravity CLI not found"
+    prompt = redact_secrets(prompt)[0]  # same redaction as call_gemini; this text goes to agy's argv
+    # Agent and tool configuration (MCP servers, hooks, settings) is never copied: agy runs in the
+    # copy's directory and could load it.
+    files = [f for f in files if not _is_agent_config(f)]
     shown = files[:200]
     listing = "\n".join(f"- {p}" for p in shown) or "- (no files; answer from the question alone)"
     if len(files) > len(shown):
@@ -2089,6 +2201,72 @@ def tool_status() -> str:
     return "\n".join(lines)
 
 
+MAX_SPEC_BYTES = _env_int("GEMINI4_MAX_SPEC_BYTES", 8_000_000)
+
+
+class _CheckedRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow a few redirects, re-checking every hop: https and a public address only."""
+    max_redirections = 5
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        target = urllib.parse.urlparse(newurl)
+        if target.scheme.lower() != "https" or not target.hostname or target.username or target.password:
+            raise ToolError(f"The spec URL redirects to {newurl}, which is not a plain https URL.")
+        if not _public_host(target.hostname):
+            raise ToolError(f"The spec URL redirects to {target.hostname!r}, which is not a public address.")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _public_host(host: str) -> bool:
+    try:
+        infos = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
+    except OSError:
+        return False
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0].split("%", 1)[0])
+        if not ip.is_global or ip.is_multicast:
+            return False
+    return bool(infos)
+
+
+def fetch_spec_url(url: str) -> Tuple[bytes, str]:
+    """Fetch a public https spec page or PDF. Private, loopback and link-local addresses (including
+    cloud metadata endpoints) and credentials in the URL are refused, on every redirect hop too."""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme.lower() != "https" or not parsed.hostname:
+        raise ToolError("Spec URLs must be https.")
+    if parsed.username or parsed.password:
+        raise ToolError("Spec URLs with credentials are not allowed.")
+    if not _public_host(parsed.hostname):
+        raise ToolError(f"Spec URL host {parsed.hostname!r} is not a public address.")
+    opener = urllib.request.build_opener(_CheckedRedirect, urllib.request.HTTPSHandler(context=_ssl_context()))
+    req = urllib.request.Request(url, headers={"User-Agent": "gemini-sidecar spec-check"})
+    try:
+        with opener.open(req, timeout=60) as resp:
+            body = resp.read(MAX_SPEC_BYTES + 1)
+            ctype = (resp.headers.get_content_type() or "").lower()
+    except ToolError:
+        raise
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        raise ToolError(f"Could not fetch the spec URL: {getattr(exc, 'reason', exc)}")
+    if len(body) > MAX_SPEC_BYTES:
+        raise ToolError(f"The spec at {url} is larger than {MAX_SPEC_BYTES:,} bytes.")
+    if ctype == "application/pdf" or body[:5] == b"%PDF-":
+        return body, "application/pdf"
+    return body, ctype or "text/plain"
+
+
+_TAG_RE = re.compile(r"<(script|style)\b.*?</\1\s*>|<[^>]{0,2000}>", re.I | re.S)
+
+
+def _html_to_text(text: str) -> str:
+    if "<" not in text:
+        return text
+    text = _TAG_RE.sub(" ", text)
+    text = html.unescape(text)
+    return re.sub(r"[ \t]*\n\s*\n\s*", "\n\n", re.sub(r"[ \t]{2,}", " ", text)).strip()
+
+
 def execute_tool(name: str, args: Dict[str, Any]) -> str:
     if name == "gemini4_status":
         return tool_status()
@@ -2174,7 +2352,7 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
             + f"<diff base=\"{base}\">\n{diff}\n</diff>\n\n## Review request\nReview this change."
             + (f" Focus: {focus}" if focus else "")
         )
-        res = call_gemini(_tier(args, "pro"), SYS_REVIEW, prompt, thinking_level="high", max_output_tokens=16384)
+        res = call_gemini(_tier(args, "pro"), SYS_REVIEW, prompt, thinking_level=PRO_DEEP_THINKING, max_output_tokens=16384)
         scope = f"{len(allowed)} changed files vs `{base}`"
         if excluded:
             scope += f"; excluded secret files: {', '.join(excluded)}"
@@ -2197,7 +2375,7 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
         if args.get("estimate_only"):
             return estimate_reply(name, _tier(args, "pro"), meta)
         prompt = f"{corpus}\n\n## Task\n{GENERATE_MODES[mode]}\n\n{spec}"
-        res = call_gemini(_tier(args, "pro"), SYS_GENERATE, prompt, thinking_level="high", max_output_tokens=65536)
+        res = call_gemini(_tier(args, "pro"), SYS_GENERATE, prompt, thinking_level=PRO_DEEP_THINKING, max_output_tokens=65536)
         truncated = res["finish_reason"] == "MAX_TOKENS"
         stage_root, written, refused, notes = stage_generated_files(res["text"], root, truncated)
         if not written:
@@ -2277,7 +2455,7 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
             if not re.match(r"^https?://", spec, re.I) and spec_file.is_file() and _is_within(spec_file.resolve(), root):
                 spec_tokens = spec_file.stat().st_size // 4
             return estimate_reply(name, _tier(args, "pro"), meta, spec_tokens) + (
-                "\nThe spec is fetched by Google and billed as input tokens; its size is not included."
+                "\nThe spec page is fetched when the check runs and billed as input tokens; its size is not included."
                 if re.match(r"^https?://", spec, re.I) else "")
         media: List[Dict[str, Any]] = []
         tools = None
@@ -2288,9 +2466,16 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
                 raise ToolError(f"Invalid spec URL: {spec!r}")
             if parsed.username or parsed.password:
                 raise ToolError("Spec URLs with credentials are not allowed; the URL is sent to Google.")
-            tools = [{"urlContext": {}}]
+            # Fetched here, not by Gemini: a fetch tool in the same call as the workspace code would let
+            # injected instructions make the model request attacker URLs.
+            body, ctype = fetch_spec_url(spec)
             spec_label = spec
-            spec_text = f"The specification is at this URL; read it with the URL context tool: {spec}"
+            if ctype == "application/pdf":
+                media = [{"inlineData": {"mimeType": "application/pdf", "data": base64.b64encode(body).decode()}}]
+                spec_text = f"The specification is the attached PDF from {spec}."
+            else:
+                page = redact_secrets(_html_to_text(body.decode("utf-8", errors="replace")))[0]
+                spec_text = f"## Specification (fetched from {spec})\n<spec>\n{page}\n</spec>"
         elif Path(spec).suffix.lower() in MEDIA_TYPES:
             media, names = load_media([spec], root, ("application/pdf", "image/"))
             spec_label = names[0]
@@ -2302,7 +2487,7 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
         focus = str(args.get("focus") or "").strip()
         prompt = (f"{spec_text}\n\n## Code\n{code}\n\n## Request\nCheck the code against the specification."
                   + (f" Focus: {focus}" if focus else ""))
-        res = call_gemini(_tier(args, "pro"), SYS_SPEC, prompt, thinking_level="high",
+        res = call_gemini(_tier(args, "pro"), SYS_SPEC, prompt, thinking_level=PRO_DEEP_THINKING,
                           max_output_tokens=32768, media_parts=media, tools=tools)
         return _clip(res["text"]) + sources_block(res) + usage_footer(res, f"spec `{spec_label}`; {describe_scope(meta)}")
 

@@ -558,7 +558,7 @@ class GeminiHttpTests(ServerTestCase):
             resp, _ = self.request("POST", "/v1/messages", self.messages_body(max_tokens=60000))
         self.assertEqual(resp.status, 200)
         entry = gw.SESSION_SPEND_USD.get("session-test")
-        expected = (1000 * 0.75 + 100 * 3.75) / 1_000_000.0
+        expected = (1000 * 1.50 + 100 * 7.50) / 1_000_000.0  # Vertex list price for gemini-3.8-flash
         self.assertAlmostEqual(entry["settled"], expected, places=9)
         self.assertAlmostEqual(entry["reserved"], 0.0, places=9)
         self.assertAlmostEqual(gw.GLOBAL_SPEND_USD["settled"], expected, places=9)
