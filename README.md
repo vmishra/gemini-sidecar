@@ -60,8 +60,8 @@ Run `/gemini:status` to check the setup, then `/gemini:analyze what does this re
 | `/gemini:status` | check setup, and see tokens and cost so far | `/gemini:status` |
 
 Options:
-- `--deep` on `analyze` uses `gemini-4-argon` instead of `gemini-3.8-flash`.
-- `--fast` on `review` does the opposite.
+- `--deep` on `analyze` uses `gemini-4-carbon` instead of `gemini-3.8-flash`; `--fast` uses `gemini-3.5-flash-lite` for answers in seconds.
+- `--fast` on `review` uses `gemini-3.8-flash` instead of `gemini-4-carbon`.
 - `--staged` reviews only staged changes.
 - `--focus "<area>"` narrows an audit, a dependency check or a spec check.
 
@@ -214,18 +214,18 @@ November 2026 list prices, USD per 1M tokens:
 
 | Model | Input | Cached input | Output (incl. thinking) | Used for |
 |---|---:|---:|---:|---|
-| `gemini-4-argon` | $2.00 | $0.10 | $10.00 | audits, reviews, refactors, spec checks, `--deep` |
+| `gemini-4-carbon` | $2.00 | $0.10 | $10.00 | audits, reviews, refactors, spec checks, `--deep` |
 | `gemini-3.8-flash` | $0.75 | $0.075 | $3.75 | analysis, triage, deps, see, subagents |
 | `gemini-3.5-flash-lite` | $0.30 | $0.03 | $2.50 | gateway background calls |
 | `claude-opus-5-5`, for comparison | $4.00 | $0.20 (writes $5.00) | $20.00 | |
 
 Scheduled changes:
-- `gemini-4-argon` moves to $4 / $0.20 / $20 on 1 Dec 2026.
+- `gemini-4-carbon` moves to $4 / $0.20 / $20 on 1 Dec 2026.
 - `gemini-3.8-flash` moves to $1.50 / $0.15 / $7.50 on 1 Jan 2027.
 
-Google Search grounding, used by `/gemini:deps`, is free for 5,000 requests a month on paid plans, then $14 per 1,000. It isn't available on the free tier. A page read by `/gemini:spec-check` is billed as input tokens, and the reported costs include it. Caching is automatic for repeated prefixes of at least 4,096 tokens on Argon (6,144 on Vertex AI) and 1,024 on Flash, but hits aren't guaranteed.
+Google Search grounding, used by `/gemini:deps`, is free for 5,000 requests a month on paid plans, then $14 per 1,000. It isn't available on the free tier. A page read by `/gemini:spec-check` is billed as input tokens, and the reported costs include it. Caching is automatic for repeated prefixes of at least 4,096 tokens on Carbon (6,144 on Vertex AI) and 1,024 on Flash, but hits aren't guaranteed.
 
-Sources: [Gemini API pricing](https://aistudio.google.com/docs/pricing), [Gemini 4 Argon announcement](https://blog.google/innovation-and-ai/models-and-research/gemini-models/gemini-4-argon/), [Claude pricing](https://platform.claude.com/docs/en/about-claude/pricing), [caching minimums](https://firebase.google.com/docs/ai-logic/context-caching).
+Sources: [Gemini API pricing](https://aistudio.google.com/docs/pricing), [Gemini 4 Carbon availability](https://blog.google/innovation-and-ai/models-and-research/gemini-models/gemini-4-carbon-now-available/), [Claude pricing](https://platform.claude.com/docs/en/about-claude/pricing), [caching minimums](https://firebase.google.com/docs/ai-logic/context-caching).
 
 ## More
 

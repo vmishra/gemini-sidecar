@@ -296,9 +296,9 @@ class GeminiCallTests(Workspace):
         self.assertTrue(text.startswith("answer"))
         self.assertNotIn("thinking...", text)
         self.assertIn("1,000 tok (400 cached)", text)
-        self.assertIn("gemini-4-argon", text)
+        self.assertIn("gemini-4-carbon", text)
         status = srv.tool_status()
-        self.assertIn("| `gemini-4-argon` | 1 | 1,000 | 400 | 70 |", status)
+        self.assertIn("| `gemini-4-carbon` | 1 | 1,000 | 400 | 70 |", status)
 
     def test_cost_uses_cached_rate(self):
         usage = {"promptTokenCount": 1_000_000, "cachedContentTokenCount": 1_000_000, "candidatesTokenCount": 0}
@@ -716,7 +716,7 @@ class ProtocolTests(unittest.TestCase):
 
     def test_model_id_normalization(self):
         self.assertEqual(srv.normalize_model_id("claude-gemini-3.8-flash[1m]"), "gemini-3.8-flash")
-        self.assertEqual(srv.normalize_model_id("gemini/gemini-4-argon"), "gemini-4-argon")
+        self.assertEqual(srv.normalize_model_id("gemini/gemini-4-carbon"), "gemini-4-carbon")
         self.assertEqual(srv.normalize_model_id("gemini-3.8-flash[effort=low]"), "gemini-3.8-flash")
 
 
@@ -927,6 +927,71 @@ class DependencyBatchTests(Workspace):
         with mock.patch.object(srv, "call_gemini", fake):
             out = srv.execute_tool("gemini4_check_dependencies", {"paths": ["package.json"]})
         self.assertIn("Not checked", out)
+
+
+def continuation_reply(text, token=None, finish="CONTINUATION", usage=None):
+    cand = {"content": {"parts": [{"text": text}] if text else []}, "finishReason": finish}
+    if token:
+        cand["continuationToken"] = token
+    return FakeResponse(json.dumps({"candidates": [cand], "usageMetadata": usage or
+                                    {"promptTokenCount": 100, "candidatesTokenCount": 10}}).encode())
+
+
+class LongDecodeTests(unittest.TestCase):
+    """Carbon writes past one response with continuation tokens; the client must follow them."""
+
+    def setUp(self):
+        self.env = mock.patch.dict(os.environ, {"GEMINI_API_KEY": "k"})
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+
+    def bodies(self, op):
+        return [json.loads(c[0][0].data) for c in op.call_args_list]
+
+    def test_continuation_is_followed_with_identical_request(self):
+        replies = [continuation_reply("part one ", "tok1"), continuation_reply("part two ", "tok2"),
+                   continuation_reply("end", finish="STOP")]
+        with mock.patch.object(srv.urllib.request, "urlopen", side_effect=replies) as op:
+            res = srv.call_gemini("gemini-4-carbon", "sys", "prompt", thinking_level="high")
+        self.assertEqual(res["text"], "part one part two end")
+        self.assertEqual(res["segments"], 3)
+        self.assertEqual(res["usage"]["promptTokenCount"], 300)  # each segment re-reads the prompt and is billed
+        b = self.bodies(op)
+        self.assertNotIn("continuationToken", b[0])
+        self.assertEqual([x.get("continuationToken") for x in b[1:]], ["tok1", "tok2"])
+        for later in b[1:]:  # partial output is never appended; the request is otherwise identical
+            self.assertEqual(later["contents"], b[0]["contents"])
+            self.assertEqual(later["generationConfig"], b[0]["generationConfig"])
+        self.assertGreater(b[0]["generationConfig"]["maxOutputTokens"], 32768)
+
+    def test_empty_max_tokens_retries_with_bigger_budget(self):
+        replies = [continuation_reply("", finish="MAX_TOKENS"), continuation_reply("answer", finish="STOP")]
+        with mock.patch.object(srv.urllib.request, "urlopen", side_effect=replies) as op:
+            res = srv.call_gemini("gemini-4-carbon", "sys", "prompt")
+        self.assertEqual(res["text"], "answer")
+        b = self.bodies(op)
+        self.assertEqual(b[1]["generationConfig"]["maxOutputTokens"], 2 * b[0]["generationConfig"]["maxOutputTokens"])
+
+    def test_runaway_continuation_is_capped(self):
+        replies = [continuation_reply(f"p{i} ", f"t{i}") for i in range(30)]
+        with mock.patch.object(srv.urllib.request, "urlopen", side_effect=replies) as op:
+            res = srv.call_gemini("gemini-4-carbon", "sys", "prompt")
+        self.assertEqual(op.call_count, srv.MAX_CONTINUATIONS + 1)
+        self.assertEqual(res["finish_reason"], "MAX_TOKENS")
+
+    def test_other_models_keep_their_budget(self):
+        with mock.patch.object(srv.urllib.request, "urlopen", return_value=continuation_reply("ok", finish="STOP")) as op:
+            srv.call_gemini("gemini-3.8-flash", "sys", "prompt", max_output_tokens=16384)
+        self.assertEqual(self.bodies(op)[0]["generationConfig"]["maxOutputTokens"], 16384)
+
+    def test_vertex_uses_v1beta1(self):
+        env = {"GOOGLE_GENAI_USE_VERTEXAI": "true", "GOOGLE_CLOUD_PROJECT": "my-proj-123", "GEMINI_API_KEY": ""}
+        with mock.patch.dict(os.environ, env), mock.patch.object(srv, "_vertex_token", return_value="t"), \
+             mock.patch.object(srv.urllib.request, "urlopen", return_value=continuation_reply("ok", finish="STOP")) as op:
+            srv.call_gemini("gemini-4-carbon", "sys", "prompt")
+        self.assertIn("/v1beta1/projects/my-proj-123/", op.call_args[0][0].full_url)
 
 
 if __name__ == "__main__":

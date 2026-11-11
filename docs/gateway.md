@@ -11,7 +11,7 @@ Claude Code sends three kinds of model requests: your main conversation, its sub
 - **Hybrid** keeps Claude Opus 5.5 for your conversation and moves the high-volume work to Gemini. It needs an Anthropic API key for the forwarded requests.
 - **All-Gemini** runs everything on Gemini and needs only Gemini credentials.
 
-Either way, a conversation stays on one model from start to finish. The one exception is opt-in: with `GEMINI4_FAILOVER_TO_GEMINI=1`, a Hybrid session moves to `gemini-4-argon` for good if Anthropic returns a rate-limit error (429 or 529), and that sends the full conversation to Google. Without the variable, the error is passed back to Claude Code unchanged.
+Either way, a conversation stays on one model from start to finish. The one exception is opt-in: with `GEMINI4_FAILOVER_TO_GEMINI=1`, a Hybrid session moves to `gemini-4-carbon` for good if Anthropic returns a rate-limit error (429 or 529), and that sends the full conversation to Google. Without the variable, the error is passed back to Claude Code unchanged.
 
 **What the gateway sends.** It forwards complete Claude Code requests to Gemini, without filtering: your messages, the system prompt, files Claude has read and tool output. The path, secret and redaction protections described in the README apply to the `/gemini:` tools, not to the gateway. Use it only where sending the whole session to Google (or Vertex AI in your project) is acceptable.
 

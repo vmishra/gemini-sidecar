@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.4.0 (2026-11-11)
+
+### Changed
+- The Pro model is now `gemini-4-carbon`, used for audits, reviews, refactors, spec checks, `/gemini:map`, `ask-antigravity` and `analyze --deep`. List pricing is the same as before: $2 / $0.10 / $10 per 1M tokens, then $4 / $0.20 / $20 from 1 December 2026. To keep the previous model, set `primary_model` (or `GEMINI4_PRIMARY_MODEL`) to `gemini-4-argon`. It still gets high thinking and correct cost reporting.
+- Gateway: the All-Gemini main conversation, the auto router's complex tier and opt-in failover use `gemini-4-carbon`.
+
+### Added
+- Long decode. When Carbon reaches the end of one response segment, it returns `finishReason=CONTINUATION` with a continuation token. The server now resends the same request with the token until the answer is complete, up to 8 segments (`GEMINI4_MAX_CONTINUATIONS`), and sums usage and cost across segments. Vertex AI calls use `v1beta1`, which is required for continuation.
+- `GEMINI4_PRO_THINKING_LEVEL` (`low`, `medium` or `high`) overrides the thinking level for the Pro model.
+
+### Fixed
+- Carbon thinks longer than Argon, and its thinking counts toward the output budget. Under the old 32K budget an audit could spend it all on reasoning and return nothing. Carbon now gets a larger budget, and an empty `MAX_TOKENS` answer is retried once with twice the room.
+- Gateway: Carbon's output per turn is capped at one segment (32,768 tokens), and a `CONTINUATION` stop maps to `max_tokens`, so All-Gemini sessions never see an error for it.
+
 ## 2.3.8 (2026-11-05)
 
 ### Fixed

@@ -1,7 +1,7 @@
 ---
 name: gemini4-security-auditor
-description: Read-only security review (injection, auth flaws, SSRF, path traversal, secrets handling) on Gemini 4 Argon.
-model: gemini-4-argon
+description: Read-only security review (injection, auth flaws, SSRF, path traversal, secrets handling) on Gemini 4 Carbon.
+model: gemini-4-carbon
 readonly: true
 ---
 

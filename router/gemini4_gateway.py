@@ -9,7 +9,7 @@ What it does:
   - Implements POST /v1/messages, POST /v1/messages/count_tokens and GET /v1/models
     (also reachable under the /anthropic/ path prefix). GET /health returns a
     minimal liveness document.
-  - Routes each /v1/messages request either to Gemini (gemini-4-argon,
+  - Routes each /v1/messages request either to Gemini (gemini-4-carbon,
     gemini-3.8-flash, gemini-3.5-flash-lite) or to api.anthropic.com, based on the
     requested model, simple keyword
     heuristics and a per-session pin.
@@ -87,7 +87,12 @@ GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models/"
 MODEL_ID_RE = re.compile(r"^[a-z0-9][a-z0-9.\-]{0,63}$")
 GCP_SEGMENT_RE = re.compile(r"^[a-z0-9][a-z0-9\-]{0,62}$")
 
-KNOWN_GEMINI_MODELS = frozenset({"gemini-4-argon", "gemini-3.8-flash", "gemini-3.5-flash-lite"})
+KNOWN_GEMINI_MODELS = frozenset({"gemini-4-carbon", "gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-4-argon"})
+# Models that get high thinking and the long request timeout.
+PRO_CLASS_MODELS = frozenset({"gemini-4-carbon", "gemini-4-argon"})
+# Models that switch to multi-segment "long decode" above one segment of output.
+LONG_DECODE_MODELS = frozenset({"gemini-4-carbon"})
+LONG_DECODE_SEGMENT_TOKENS = 32768
 
 NOT_IMPLEMENTED_PREFIXES = ("/v1/responses", "/v1/chat/completions", "/v1/completions", "/cursor", "/openai/")
 NOT_IMPLEMENTED_BODY = {
@@ -168,13 +173,14 @@ RISK_WORDS_RE = re.compile(
 )
 
 # USD per 1M tokens: (input, cached input, output). Used for local budget estimates only.
-# gemini-4-argon list price rises to 4.00 / 0.20 / 20.00 on 2026-12-01.
+# gemini-4-carbon list price rises to 4.00 / 0.20 / 20.00 on 2026-12-01.
 # gemini-3.8-flash prices are promotional through 2026-12-31.
 # Override with GEMINI4_PRICES_JSON='{"model": [in, cached, out]}'.
 DEFAULT_PRICES_PER_MTOK: Dict[str, Tuple[float, float, float]] = {
-    "gemini-4-argon": (2.00, 0.10, 10.00),
+    "gemini-4-carbon": (2.00, 0.10, 10.00),
     "gemini-3.8-flash": (0.75, 0.075, 3.75),
     "gemini-3.5-flash-lite": (0.30, 0.03, 2.50),
+    "gemini-4-argon": (2.00, 0.10, 10.00),
     "claude-opus-5-5": (4.00, 0.40, 20.00),
     "claude-sonnet-5-5": (2.00, 0.20, 10.00),
 }
@@ -182,10 +188,10 @@ DEFAULT_PRICES_PER_MTOK: Dict[str, Tuple[float, float, float]] = {
 FALLBACK_PRICE_PER_MTOK = (4.00, 0.40, 20.00)
 
 GATEWAY_MODEL_CATALOG: List[Dict[str, Any]] = [
-    {"id": "claude-gemini-4-argon", "display_name": "Gemini 4 Argon", "created_at": "2026-10-27T00:00:00Z"},
+    {"id": "claude-gemini-4-carbon", "display_name": "Gemini 4 Carbon", "created_at": "2026-11-10T00:00:00Z"},
     {"id": "claude-gemini-3.8-flash", "display_name": "Gemini 3.8 Flash", "created_at": "2026-09-01T00:00:00Z"},
     {"id": "claude-gemini-3.5-flash-lite", "display_name": "Gemini 3.5 Flash-Lite", "created_at": "2026-07-20T00:00:00Z"},
-    {"id": "claude-auto-gemini", "display_name": "Gemini auto router (flash-lite / flash / argon)", "created_at": "2026-11-01T00:00:00Z"},
+    {"id": "claude-auto-gemini", "display_name": "Gemini auto router (flash-lite / flash / carbon)", "created_at": "2026-11-01T00:00:00Z"},
     {"id": "claude-opus-5-5", "display_name": "Claude Opus 5.5 (Anthropic passthrough)", "created_at": "2026-09-15T00:00:00Z"},
     {"id": "claude-sonnet-5-5", "display_name": "Claude Sonnet 5.5 (Anthropic passthrough)", "created_at": "2026-09-15T00:00:00Z"},
 ]
@@ -334,7 +340,7 @@ def resolve_security_target() -> str:
     override = _security_model()
     if override and is_valid_model_id(override):
         return f"gemini/{override}"
-    return "gemini/gemini-4-argon"
+    return "gemini/gemini-4-carbon"
 
 
 def resolve_gemini_model(raw: str) -> str:
@@ -488,7 +494,7 @@ def classify_and_route(
         if SECURITY_RE.search(last_text):
             target, tier = sec_target, "security"
         elif token_count_est > 150_000 or LONG_DECODE_RE.search(last_text):
-            target, tier = "gemini/gemini-4-argon", "complex"
+            target, tier = "gemini/gemini-4-carbon", "complex"
         elif len(last_text) < 140 and turn_count <= 2 and not has_risk:
             target, tier = "gemini/gemini-3.5-flash-lite", "simple"
         else:
@@ -505,16 +511,16 @@ def classify_and_route(
 
     # 4. Primary provider quota failure: pin the session to Gemini.
     if simulate_429_primary:
-        target = "gemini/gemini-4-argon"
+        target = "gemini/gemini-4-carbon"
         pin_failover(session_id, target, turn_count)
         return _decision(target, "sticky_quota_failover_429", "Primary provider returned 429; session pinned to Gemini.", True, digest)
 
     # 5. Caller-supplied subagent flag (not sent by Claude Code itself).
     if subagent_flag:
         if SECURITY_RE.search(last_text):
-            target, rule = sec_target, "subagent_security_argon"
+            target, rule = sec_target, "subagent_security_pro"
         elif token_count_est > 150_000 or LONG_DECODE_RE.search(last_text):
-            target, rule = "gemini/gemini-4-argon", "subagent_deep_argon"
+            target, rule = "gemini/gemini-4-carbon", "subagent_deep_pro"
         else:
             target, rule = "gemini/gemini-3.8-flash", "subagent_workhorse_flash"
         return _decision(target, rule, "Subagent request.", False, digest)
@@ -641,10 +647,15 @@ def translate_anthropic_to_gemini_payload(body: Dict[str, Any], gemini_model_id:
             else:
                 contents.append({"role": role, "parts": parts})
 
-    is_argon_class = "argon" in gemini_model_id
-    gen_cfg: Dict[str, Any] = {"maxOutputTokens": resolve_max_output_tokens(body)}
+    is_pro_class = gemini_model_id.rsplit("/", 1)[-1] in PRO_CLASS_MODELS
+    max_out = resolve_max_output_tokens(body)
+    if gemini_model_id.rsplit("/", 1)[-1] in LONG_DECODE_MODELS:
+        # One non-streaming segment. Larger budgets switch on long decode, which this endpoint
+        # does not continue; thinking counts toward the same budget.
+        max_out = min(max_out, LONG_DECODE_SEGMENT_TOKENS)
+    gen_cfg: Dict[str, Any] = {"maxOutputTokens": max_out}
     if "flash-lite" not in gemini_model_id:
-        gen_cfg["thinkingConfig"] = {"thinkingLevel": "HIGH" if is_argon_class else "LOW"}
+        gen_cfg["thinkingConfig"] = {"thinkingLevel": "HIGH" if is_pro_class else "LOW"}
 
     payload: Dict[str, Any] = {
         "contents": contents or [{"role": "user", "parts": [{"text": " "}]}],
@@ -741,7 +752,9 @@ def gemini_response_to_anthropic(gem_resp: Any, model_label: str) -> Dict[str, A
 
     if has_tool_use:
         stop_reason = "tool_use"
-    elif finish == "MAX_TOKENS":
+    elif finish in ("MAX_TOKENS", "CONTINUATION"):
+        # CONTINUATION (long decode) means the segment's output limit was reached; Claude Code
+        # treats it like any max_tokens stop.
         stop_reason = "max_tokens"
     elif finish == "STOP" or blocks:
         stop_reason = "end_turn"
@@ -1352,7 +1365,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
         allowed, reservation, message = reserve_budget(session_id, model, est_input, max_out)
         if not allowed:
             raise GatewayRequestError(403, "permission_error", message)
-        timeout_s = 1200 if "argon" in model else 300
+        timeout_s = 1200 if model.rsplit("/", 1)[-1] in PRO_CLASS_MODELS else 300
         outcome: Dict[str, Any] = {}
         done = threading.Event()
         digest = session_digest(session_id)
@@ -1449,7 +1462,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             if (err.code in (429, 529) and gemini_credentials_available()
                     and (os.environ.get("GEMINI4_FAILOVER_TO_GEMINI") or "").strip() == "1"):
                 err.close()
-                target = "gemini-4-argon"
+                target = "gemini-4-carbon"
                 pin_failover(session_id, f"gemini/{target}", len(body.get("messages") or []))
                 decision = dict(decision, selected_model=f"gemini/{target}", rule_matched="live_429_sticky_failover")
                 log_event("failover", session=digest, model=target, rule=decision["rule_matched"])

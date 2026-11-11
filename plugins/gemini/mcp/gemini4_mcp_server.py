@@ -49,7 +49,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Dict, List, Optional, Tuple
 
 SERVER_NAME = "gemini4"
-SERVER_VERSION = "2.3.8"
+SERVER_VERSION = "2.4.0"
 DEFAULT_PROTOCOL_VERSION = "2025-06-18"
 
 _RPC_OUT: BinaryIO = sys.stdout.buffer
@@ -76,11 +76,11 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-def normalize_model_id(raw: str, fallback: str = "gemini-4-argon") -> str:
+def normalize_model_id(raw: str, fallback: str = "gemini-4-carbon") -> str:
     """Strip harness decorations so the ID is valid for the Gemini API.
 
     `claude-gemini-3.8-flash[1m]` -> `gemini-3.8-flash`
-    `gemini/gemini-4-argon`       -> `gemini-4-argon`
+    `gemini/gemini-4-carbon`      -> `gemini-4-carbon`
     `gemini-3.8-flash[effort=low]`-> `gemini-3.8-flash`
     """
     m = (raw or "").strip()
@@ -94,7 +94,7 @@ def normalize_model_id(raw: str, fallback: str = "gemini-4-argon") -> str:
 
 
 MODEL_PRO = normalize_model_id(
-    _env("GEMINI4_PLUGIN_PRIMARY_MODEL", "GEMINI4_PRIMARY_MODEL", default="gemini-4-argon")
+    _env("GEMINI4_PLUGIN_PRIMARY_MODEL", "GEMINI4_PRIMARY_MODEL", default="gemini-4-carbon")
 )
 MODEL_FLASH = normalize_model_id(
     _env("GEMINI4_PLUGIN_SUBAGENT_MODEL", "GEMINI4_SUBAGENT_MODEL", default="gemini-3.8-flash")
@@ -105,7 +105,7 @@ MODEL_LITE = normalize_model_id(
 MODEL_SECURITY_OVERRIDE = _env("GEMINI4_PLUGIN_SECURITY_MODEL", "GEMINI4_SECURITY_MODEL")
 MODEL_SECURITY = normalize_model_id(MODEL_SECURITY_OVERRIDE) if MODEL_SECURITY_OVERRIDE else MODEL_PRO
 
-TIERS = {"pro": MODEL_PRO, "argon": MODEL_PRO, "flash": MODEL_FLASH, "flash-lite": MODEL_LITE}
+TIERS = {"pro": MODEL_PRO, "carbon": MODEL_PRO, "flash": MODEL_FLASH, "flash-lite": MODEL_LITE}
 
 MAX_CONTEXT_CHARS = _env_int("GEMINI4_MAX_CONTEXT_CHARS", 4_000_000)  # hard cap on raw size
 # Budget in estimated tokens (see estimate_tokens). The models accept 1,048,576 input tokens; the
@@ -118,14 +118,20 @@ MAX_FILES = _env_int("GEMINI4_MAX_FILES", 1500)
 MAX_FILE_BYTES = _env_int("GEMINI4_MAX_FILE_BYTES", 1_000_000)
 MAX_RESULT_CHARS = _env_int("GEMINI4_MAX_RESULT_CHARS", 60_000)  # stays under host MCP output caps
 REQUEST_TIMEOUT_S = _env_int("GEMINI4_REQUEST_TIMEOUT", 900)
+# Models that write past one response with continuation tokens ("long decode"). Each non-streaming
+# segment carries up to 32,768 output tokens, thinking included; a segment may take up to 20 minutes.
+LONG_DECODE_MODELS = {"gemini-4-carbon"}
+LONG_DECODE_TIMEOUT_S = _env_int("GEMINI4_LONG_DECODE_TIMEOUT", 1260)
+MAX_CONTINUATIONS = _env_int("GEMINI4_MAX_CONTINUATIONS", 8)
 STAGING_DIRNAME = ".gemini4-staging"
 
 # USD per 1M tokens: (input, cached input, output). Thinking tokens bill as output.
 # Override with GEMINI4_PRICES_JSON='{"model": [in, cached, out], ...}'.
 DEFAULT_PRICES: Dict[str, Tuple[float, float, float]] = {
-    "gemini-4-argon": (2.00, 0.10, 10.00),
+    "gemini-4-carbon": (2.00, 0.10, 10.00),
     "gemini-3.8-flash": (0.75, 0.075, 3.75),
     "gemini-3.5-flash-lite": (0.30, 0.03, 2.50),
+    "gemini-4-argon": (2.00, 0.10, 10.00),  # previous default; kept so a pinned model still reports cost
 }
 
 # --------------------------------------------------------------------------- #
@@ -1134,7 +1140,15 @@ def call_gemini(
     or raises ToolError. `media_parts` (inline images, video, PDF) go before the prompt text;
     `tools` enables Gemini-side tools such as Google Search grounding or URL context."""
     creds = resolve_credentials()
+    long_decode = model in LONG_DECODE_MODELS
+    if long_decode:
+        # Thinking counts toward the output budget. A budget above one segment (32,768) lets the
+        # model keep going through continuation tokens instead of returning an empty answer.
+        max_output_tokens = max(max_output_tokens * 3, 98_304)
     gen_cfg: Dict[str, Any] = {"maxOutputTokens": max_output_tokens}
+    level_override = _env("GEMINI4_PRO_THINKING_LEVEL").lower()
+    if model == MODEL_PRO and level_override in ("low", "medium", "high"):
+        thinking_level = level_override
     if "flash-lite" not in model:
         gen_cfg["thinkingConfig"] = {"thinkingLevel": thinking_level.upper()}
     prompt = redact_secrets(prompt)[0]  # includes questions, focus and specs typed by the user or agent
@@ -1145,7 +1159,6 @@ def call_gemini(
     }
     if tools:
         request["tools"] = tools
-    payload = json.dumps(request).encode("utf-8")
 
     headers = {"Content-Type": "application/json"}
     if creds["api_key"] and not creds["use_vertex"]:
@@ -1173,7 +1186,8 @@ def call_gemini(
             raise ToolError("Invalid GOOGLE_CLOUD_PROJECT value.")
         host = "aiplatform.googleapis.com" if loc == "global" else f"{loc}-aiplatform.googleapis.com"
         url = (
-            f"https://{host}/v1/projects/{urllib.parse.quote(creds['project'])}"
+            # v1beta1: continuation tokens (long decode) are only accepted there.
+            f"https://{host}/v1beta1/projects/{urllib.parse.quote(creds['project'])}"
             f"/locations/{urllib.parse.quote(loc)}/publishers/google/models/"
             f"{urllib.parse.quote(model)}:generateContent"
         )
@@ -1186,56 +1200,96 @@ def call_gemini(
         )
 
     started = time.time()
-    body: Dict[str, Any] = {}
-    last_error = ""
-    for attempt in range(3):
-        req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
-        try:
-            with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_S, context=_ssl_context()) as resp:
-                body = json.loads(resp.read().decode("utf-8"))
-            break
-        except urllib.error.HTTPError as exc:
-            err_body = exc.read().decode("utf-8", errors="replace")
-            last_error = _http_error_message(exc.code, err_body, model)
-            if exc.code in (429, 500, 502, 503, 504) and attempt < 2:
-                time.sleep(4 * (attempt + 1) ** 2)
-                continue
-            raise ToolError(last_error)
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            last_error = f"Network error calling Gemini ({backend}): {getattr(exc, 'reason', exc)}"
-            if attempt < 2:
-                time.sleep(4 * (attempt + 1) ** 2)
-                continue
-            raise ToolError(last_error)
-    else:  # pragma: no cover - loop always breaks or raises
-        raise ToolError(last_error)
+    timeout = LONG_DECODE_TIMEOUT_S if long_decode else REQUEST_TIMEOUT_S
 
-    candidates = body.get("candidates") or []
-    if not candidates:
-        block = (body.get("promptFeedback") or {}).get("blockReason", "no candidates returned")
-        raise ToolError(f"Gemini returned no answer ({block}).")
-    cand = candidates[0]
-    parts = (cand.get("content") or {}).get("parts") or []
-    text = "".join(p.get("text", "") for p in parts if not p.get("thought"))
-    finish = cand.get("finishReason", "")
-    usage = body.get("usageMetadata") or {}
-    _record_usage(model, usage)
+    def post(req_body: Dict[str, Any]) -> Dict[str, Any]:
+        payload = json.dumps(req_body).encode("utf-8")
+        last_error = ""
+        for attempt in range(3):
+            req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                err_body = exc.read().decode("utf-8", errors="replace")
+                last_error = _http_error_message(exc.code, err_body, model)
+                if exc.code in (429, 500, 502, 503, 504) and attempt < 2:
+                    time.sleep(4 * (attempt + 1) ** 2)
+                    continue
+                raise ToolError(last_error)
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                last_error = f"Network error calling Gemini ({backend}): {getattr(exc, 'reason', exc)}"
+                if attempt < 2:
+                    time.sleep(4 * (attempt + 1) ** 2)
+                    continue
+                raise ToolError(last_error)
+        raise ToolError(last_error)  # pragma: no cover - the loop always returns or raises
+
+    texts: List[str] = []
+    usage: Dict[str, int] = {}
+    sources: List[Dict[str, str]] = []
+    queries: List[str] = []
+    finish = ""
+    segments = 0
+    token: Optional[str] = None
+    budget_retry_done = False
+    while True:
+        req_body = dict(request)
+        if token:
+            # Same request every hop, plus the token; partial output is never appended to contents.
+            req_body["continuationToken"] = token
+        body = post(req_body)
+        segments += 1
+        seg_usage = body.get("usageMetadata") or {}
+        _record_usage(model, seg_usage)
+        for key, val in seg_usage.items():
+            if isinstance(val, int):
+                usage[key] = usage.get(key, 0) + val
+        candidates = body.get("candidates") or []
+        if not candidates:
+            block = (body.get("promptFeedback") or {}).get("blockReason", "no candidates returned")
+            raise ToolError(f"Gemini returned no answer ({block}).")
+        cand = candidates[0]
+        parts = (cand.get("content") or {}).get("parts") or []
+        texts.append("".join(p.get("text", "") for p in parts if not p.get("thought")))
+        finish = cand.get("finishReason", "")
+        grounding = cand.get("groundingMetadata") or {}
+        for chunk in grounding.get("groundingChunks") or []:
+            web = chunk.get("web") or {}
+            if web.get("uri") and all(src["uri"] != web["uri"] for src in sources):
+                sources.append({"title": str(web.get("title") or web.get("domain") or "source"),
+                                "uri": str(web["uri"])})
+        queries.extend(q for q in grounding.get("webSearchQueries") or [] if q not in queries)
+        next_token = cand.get("continuationToken") or body.get("continuationToken")
+        if finish == "CONTINUATION" and next_token:
+            if segments > MAX_CONTINUATIONS:
+                finish = "MAX_TOKENS"
+                break
+            token = next_token
+            continue
+        if (finish == "MAX_TOKENS" and not "".join(texts).strip() and not budget_retry_done
+                and max_output_tokens < 262_144):
+            # All of the budget went to thinking. Retry once with twice the room.
+            budget_retry_done = True
+            max_output_tokens = min(max_output_tokens * 2, 262_144)
+            request["generationConfig"] = dict(gen_cfg, maxOutputTokens=max_output_tokens)
+            gen_cfg = request["generationConfig"]
+            token = next_token
+            continue
+        break
+
+    text = "".join(texts)
     if not text.strip():
         raise ToolError(f"Gemini returned an empty answer (finishReason={finish or 'unknown'}).")
-    grounding = cand.get("groundingMetadata") or {}
-    sources: List[Dict[str, str]] = []
-    for chunk in grounding.get("groundingChunks") or []:
-        web = chunk.get("web") or {}
-        if web.get("uri") and all(src["uri"] != web["uri"] for src in sources):
-            sources.append({"title": str(web.get("title") or web.get("domain") or "source"), "uri": str(web["uri"])})
     return {
         "text": text,
         "sources": sources,
-        "search_queries": list(grounding.get("webSearchQueries") or []),
+        "search_queries": queries,
         "model": model,
         "backend": backend,
         "finish_reason": finish,
         "usage": usage,
+        "segments": segments,
         "cost_usd": estimate_cost(model, usage),
         "latency_s": round(time.time() - started, 1),
     }

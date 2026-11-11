@@ -1,6 +1,6 @@
 {
   "name": "gemini",
-  "version": "2.3.8",
+  "version": "2.4.0",
   "description": "Offload codebase analysis, security audits, diff review, large refactors, test generation, test triage, dependency and CVE checks, spec compliance and screenshot debugging to Gemini through a local MCP server. Files are read from disk on the server side; only the answer returns to Claude Code.",
   "author": {
     "name": "Vikas Mishra"
@@ -8,7 +8,7 @@
   "homepage": "https://github.com/vmishra/gemini-sidecar",
   "repository": "https://github.com/vmishra/gemini-sidecar",
   "license": "Apache-2.0",
-  "keywords": ["gemini", "gemini-4-argon", "gemini-3.8-flash", "mcp", "code-review", "security", "antigravity"],
+  "keywords": ["gemini", "gemini-4-carbon", "gemini-3.8-flash", "mcp", "code-review", "security", "antigravity"],
   "userConfig": {
     "gemini_api_key": {
       "type": "string",
@@ -33,7 +33,7 @@
       "type": "string",
       "title": "Pro model",
       "description": "Used for security audits, reviews, refactors and deep analysis.",
-      "default": "gemini-4-argon"
+      "default": "gemini-4-carbon"
     },
     "subagent_model": {
       "type": "string",

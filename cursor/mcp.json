@@ -4,7 +4,7 @@
       "command": "python3",
       "args": ["__GEMINI4_MCP_SERVER_PATH__"],
       "env": {
-        "GEMINI4_PRIMARY_MODEL": "gemini-4-argon",
+        "GEMINI4_PRIMARY_MODEL": "gemini-4-carbon",
         "GEMINI4_SUBAGENT_MODEL": "gemini-3.8-flash",
         "GEMINI4_BACKGROUND_MODEL": "gemini-3.5-flash-lite"
       }

@@ -12,9 +12,9 @@
 # vertex_project / vertex_location instead of api_key.
 
 model_list:
-  - model_name: claude-gemini-4-argon
+  - model_name: claude-gemini-4-carbon
     litellm_params:
-      model: gemini/gemini-4-argon
+      model: gemini/gemini-4-carbon
       api_key: os.environ/GEMINI_API_KEY
       timeout: 1200
 

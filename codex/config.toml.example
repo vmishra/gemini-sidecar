@@ -8,11 +8,11 @@
 command = "python3"
 args = ["/absolute/path/to/gemini-sidecar/plugins/gemini/mcp/gemini4_mcp_server.py"]
 startup_timeout_sec = 20
-# Security audits and large refactors on gemini-4-argon can take several minutes.
+# Security audits and large refactors on gemini-4-carbon can take several minutes.
 tool_timeout_sec = 900
 
 [mcp_servers.gemini4.env]
-GEMINI4_PRIMARY_MODEL = "gemini-4-argon"
+GEMINI4_PRIMARY_MODEL = "gemini-4-carbon"
 GEMINI4_SUBAGENT_MODEL = "gemini-3.8-flash"
 GEMINI4_BACKGROUND_MODEL = "gemini-3.5-flash-lite"
 # GOOGLE_GENAI_USE_VERTEXAI = "true"

@@ -182,7 +182,7 @@ class AuthAndHostTests(ServerTestCase):
         resp, payload = self.request("GET", "/v1/models")
         self.assertEqual(resp.status, 200)
         ids = [m["id"] for m in json.loads(payload)["data"]]
-        self.assertIn("claude-gemini-4-argon", ids)
+        self.assertIn("claude-gemini-4-carbon", ids)
 
     def test_host_rejected(self):
         resp, _ = self.request("GET", "/health", token=False, headers={"Host": f"evil.example:{self.port}"})
@@ -276,7 +276,7 @@ class RoutingTests(unittest.TestCase):
         ]
         decision = gw.classify_and_route(session_id="s-auto", requested_model="claude-auto-gemini",
                                          messages=messages, token_count_est=100)
-        self.assertEqual(decision["selected_model"], "gemini/gemini-4-argon")
+        self.assertEqual(decision["selected_model"], "gemini/gemini-4-carbon")
 
     def test_model_id_validation(self):
         self.assertFalse(gw.is_valid_model_id("x/../y"))
@@ -287,7 +287,7 @@ class RoutingTests(unittest.TestCase):
                 gw.resolve_gemini_model(bad)
             self.assertEqual(ctx.exception.status, 400)
         with self.assertRaises(gw.GatewayRequestError):
-            gw.classify_and_route(session_id="s", requested_model="claude-gemini-4-argon/../x",
+            gw.classify_and_route(session_id="s", requested_model="claude-gemini-4-carbon/../x",
                                   messages=[{"role": "user", "content": "hi"}], token_count_est=1)
         with self.assertRaises(gw.GatewayRequestError):
             gw.parse_selected_model("anthropic/claude/../x")
@@ -313,16 +313,16 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(decision["rule_matched"], "unmapped_model_default")
 
     def test_failover_pin_not_overwritten(self):
-        gw.pin_failover("fo", "gemini/gemini-4-argon", 1)
+        gw.pin_failover("fo", "gemini/gemini-4-carbon", 1)
         decision = gw.classify_and_route(session_id="fo", requested_model="claude-opus-5-5",
                                          messages=[{"role": "user", "content": "Continue"}],
                                          token_count_est=100)
-        self.assertEqual(decision["selected_model"], "gemini/gemini-4-argon")
+        self.assertEqual(decision["selected_model"], "gemini/gemini-4-carbon")
         gw.classify_and_route(session_id="fo", requested_model="claude-gemini-3.8-flash",
                               messages=[{"role": "user", "content": "x"}], token_count_est=100)
         pin = gw.SESSION_PINS.get("fo")
         self.assertTrue(pin["failover"])
-        self.assertEqual(pin["model"], "gemini/gemini-4-argon")
+        self.assertEqual(pin["model"], "gemini/gemini-4-carbon")
 
     def test_non_string_session_id(self):
         gw.classify_and_route(session_id=12345, requested_model="claude-opus-5-5",
@@ -379,12 +379,28 @@ class TranslationTests(unittest.TestCase):
 
     def test_max_tokens_not_raised(self):
         body = {"messages": [{"role": "user", "content": "x"}], "max_tokens": 8192, "temperature": 0.2}
-        payload = gw.translate_anthropic_to_gemini_payload(body, "gemini-4-argon")
+        payload = gw.translate_anthropic_to_gemini_payload(body, "gemini-4-carbon")
         self.assertEqual(payload["generationConfig"]["maxOutputTokens"], 8192)
         self.assertNotIn("temperature", payload["generationConfig"])
         body["max_tokens"] = 200000
-        payload = gw.translate_anthropic_to_gemini_payload(body, "gemini-4-argon")
+        payload = gw.translate_anthropic_to_gemini_payload(body, "gemini-3.8-flash")
         self.assertEqual(payload["generationConfig"]["maxOutputTokens"], 65536)
+        payload = gw.translate_anthropic_to_gemini_payload(body, "gemini-4-carbon")
+        self.assertEqual(payload["generationConfig"]["maxOutputTokens"], 32768)  # one long-decode segment
+
+    def test_pro_class_models_get_high_thinking(self):
+        body = {"messages": [{"role": "user", "content": "x"}], "max_tokens": 100}
+        for model in ("gemini-4-carbon", "gemini/gemini-4-carbon", "gemini-4-argon"):
+            payload = gw.translate_anthropic_to_gemini_payload(body, model)
+            self.assertEqual(payload["generationConfig"]["thinkingConfig"]["thinkingLevel"], "HIGH", model)
+        payload = gw.translate_anthropic_to_gemini_payload(body, "gemini-3.8-flash")
+        self.assertEqual(payload["generationConfig"]["thinkingConfig"]["thinkingLevel"], "LOW")
+
+    def test_continuation_finish_maps_to_max_tokens(self):
+        resp = {"candidates": [{"content": {"parts": [{"text": "partial"}]}, "finishReason": "CONTINUATION",
+                                "continuationToken": "t"}], "usageMetadata": {"promptTokenCount": 5, "candidatesTokenCount": 2}}
+        out = gw.gemini_response_to_anthropic(resp, "claude-gemini-4-carbon")
+        self.assertEqual(out["stop_reason"], "max_tokens")
 
     def test_system_merge_and_thinking_dropped(self):
         body = {
@@ -522,7 +538,7 @@ class GeminiHttpTests(ServerTestCase):
     def test_invalid_model_rejected_over_http(self):
         rec = Recorder(gemini_ok([{"text": "ok"}]))
         with mock.patch.object(urllib.request, "urlopen", rec):
-            resp, _ = self.request("POST", "/v1/messages", self.messages_body(model="claude-gemini-4-argon/../x"))
+            resp, _ = self.request("POST", "/v1/messages", self.messages_body(model="claude-gemini-4-carbon/../x"))
         self.assertEqual(resp.status, 400)
         self.assertEqual(rec.requests, [])
 
@@ -630,10 +646,10 @@ class AnthropicPassthroughTests(ServerTestCase):
                 "messages": [{"role": "user", "content": "hi"}]})
         self.assertEqual(resp.status, 200)
         self.assertEqual(json.loads(payload)["content"][0]["text"], "from gemini")
-        self.assertIn("gemini-4-argon:generateContent", calls[1].full_url)
+        self.assertIn("gemini-4-carbon:generateContent", calls[1].full_url)
         pin = gw.SESSION_PINS.get("fo-http")
         self.assertTrue(pin["failover"])
-        self.assertEqual(pin["model"], "gemini/gemini-4-argon")
+        self.assertEqual(pin["model"], "gemini/gemini-4-carbon")
 
     def test_429_is_returned_not_resent_to_google_by_default(self):
         calls = []
@@ -697,8 +713,8 @@ class TokenAndCliTests(unittest.TestCase):
                 gw._vertex_access_token()
 
     def test_prices_override(self):
-        with mock.patch.dict(os.environ, {"GEMINI4_PRICES_JSON": '{"gemini-4-argon": [4.0, 0.2, 20.0]}'}):
-            self.assertEqual(gw._price_for("gemini-4-argon"), (4.0, 0.2, 20.0))
+        with mock.patch.dict(os.environ, {"GEMINI4_PRICES_JSON": '{"gemini-4-carbon": [4.0, 0.2, 20.0]}'}):
+            self.assertEqual(gw._price_for("gemini-4-carbon"), (4.0, 0.2, 20.0))
         self.assertEqual(gw._price_for("claude-sonnet-5-5"), (2.00, 0.20, 10.00))
 
 
