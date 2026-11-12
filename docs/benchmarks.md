@@ -48,6 +48,23 @@ Times are wall clock for the whole command. Costs are at Vertex AI global list p
 - **Streaming removed the re-reads.** Carbon writes long answers in segments, and each segment re-reads the prompt. Before 2.4.4, a non-streamed segment held 32,768 output tokens and the refactor re-read its prompt several times (48,458 input tokens for 7,845 tokens of files). Streamed segments hold 65,536, so the same refactor now reads its prompt once. Measured before and after on the same task, cost fell from $0.95 to $0.59 and time from 624 s to 308 s.
 - **Thinking level matters.** At high thinking, Carbon took 232 s for the review and 21 minutes for the spec check. 2.4.3 and later use medium for every task; `GEMINI4_PRO_THINKING_LEVEL` changes it.
 
+### Tokens, requests and output speed
+
+| Task | Previous: input | Previous: output | Previous: requests | Previous: output tok/s | Carbon: input | Carbon: output | Carbon: requests | Carbon: output tok/s |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Security audit, 4,278 lines | 81,730 | 32,237 | 1 | 57 | 81,730 | 33,185 | 1 | 77 |
+| Review, 2 planted bugs | 1,226 | 1,231 | 1 | 30 | 1,226 | 1,120 | 1 | 11 |
+| Deep analysis, 106 files | 258,868 | 1,940 | 1 | 45 | 258,868 | 3,649 | 1 | 48 |
+| Spec check, RFC 6585 | 62,920 | 8,272 | 1 | 70 | 33,358 | 10,236 | 1 | 91 |
+| Refactor, 2-file feature | 7,845 | 17,800 | 1 | 83 | 7,845 | 27,775 | 1 | 90 |
+| Architecture map | 53,363 | 7,442 | 1 | 62 | 53,363 | 6,633 | 1 | 34 |
+| **Six tasks** | **465,952** | **68,922** | **6** | | **436,390** | **82,598** | **6** | |
+
+- **Input** is the prompt the model was sent: files, diff or spec, plus the instructions. It is the same for both models except for the spec check. The previous model fetched the page itself, and from 2.4.1 the server sends only the page text, which is half the size.
+- **Output** includes thinking tokens, which are billed as output. Carbon wrote 20% more output in total, most of it on the refactor (27,775 tokens against 17,800).
+- **Requests** counts model API calls for one command. Each command is a single tool call from the agent. With streaming (2.4.4), Carbon finished every task in one request; before that, long answers needed continuation requests that each re-read the prompt.
+- **Output tok/s** is output tokens divided by wall time. Carbon figures are medians of three runs.
+
 ### What broke on the old settings
 
 Before 2.4.0, the plugin gave every model a 32K output budget and high thinking. On those settings Carbon failed two tasks:
