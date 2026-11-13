@@ -54,7 +54,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Dict, List, Optional, Tuple
 
 SERVER_NAME = "gemini4"
-SERVER_VERSION = "2.4.5"
+SERVER_VERSION = "2.4.6"
 DEFAULT_PROTOCOL_VERSION = "2025-06-18"
 
 _RPC_OUT: BinaryIO = sys.stdout.buffer
@@ -604,7 +604,16 @@ def _git_ignored(root: Path, rels: List[str]) -> set:
 
 def _glob_regex(pattern: str) -> "re.Pattern[str]":
     """Shell glob to regex over '/'-separated paths: `*` and `?` stay inside one path segment,
-    `**/` matches any number of directories (including none)."""
+    `**/` matches any number of directories (including none).
+
+    Repeated `**` segments are collapsed (they mean the same thing), and patterns with more than four
+    are refused: each `**` multiplies the backtracking work, and `**/` repeated a dozen times could
+    stall the server on a single path."""
+    pattern = re.sub(r"(?:\*\*/)+", "**/", pattern)
+    pattern = re.sub(r"\*{3,}", "**", pattern)
+    pattern = re.sub(r"(?:\*\*/)+\*\*(?=/|$)", "**", pattern)
+    if pattern.count("**") > 4:
+        raise ToolError("Glob pattern has too many `**` segments; use at most four.")
     out, i = [], 0
     while i < len(pattern):
         c = pattern[i]
@@ -2418,7 +2427,8 @@ def execute_tool(name: str, args: Dict[str, Any]) -> str:
         # Example env files are excluded too: renaming .env to .env.example would otherwise put
         # the real values in the diff under an allow-listed name.
         allowed = [n for n in changed
-                   if not is_secret_file(Path(n)) and Path(n).name.lower() not in SECRET_FILE_ALLOW]
+                   if not is_secret_file(Path(n)) and Path(n).name.lower() not in SECRET_FILE_ALLOW
+                   and not _inside_git_dir(root / n, root)]
         excluded = sorted(set(changed) - set(allowed))
         # Real binaries are listed by name, not diffed. Everything else is diffed with --text, so a
         # .gitattributes "-diff"/"binary" entry on a text file cannot hide a change from the review.

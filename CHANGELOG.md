@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.4.6 (2026-11-13)
+
+### Security
+Found by audits in the five-model benchmark and reproduced before fixing.
+- **Glob patterns could stall the server.** Each `**/` in an agent-supplied glob became a nested optional regex group. Twelve in a row took over a minute to test against one path. Repeated `**` segments are now collapsed, and patterns with more than four are refused.
+- `/gemini:review` also leaves out changed files that sit inside a nested git directory, not only secret file names.
+- `install.sh` refuses to write a backup through an existing file or symlink at the backup path.
+
 ## 2.4.5 (2026-11-11)
 
 ### Fixed

@@ -795,6 +795,17 @@ class ContextBudgetTests(Workspace):
         self.assertTrue(rx("src/[ab].py").fullmatch("src/a.py"))
         self.assertFalse(rx("src/[!ab].py").fullmatch("src/a.py"))
 
+    def test_glob_backtracking_is_bounded(self):
+        import time as _t
+        path = "a/" * 30 + "b.txt"
+        t0 = _t.time()
+        rx = srv._glob_regex("**/" * 16 + "*.py")  # collapses to **/*.py
+        self.assertIsNone(rx.fullmatch(path))
+        self.assertLess(_t.time() - t0, 1)
+        self.assertTrue(srv._glob_regex("**/**/*.py").fullmatch("x/y/z.py"))
+        with self.assertRaises(srv.ToolError):
+            srv._glob_regex("**/a/**/b/**/c/**/d/**/e")
+
     def test_fair_order_lets_every_directory_take_turns(self):
         rels = [f"big/f{i}.js" for i in range(50)] + ["core/a.js", "core/b.js", "z.md"]
         head = srv.fair_order(rels)[:6]

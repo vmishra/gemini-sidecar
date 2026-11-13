@@ -65,8 +65,12 @@ refuse_symlink() {
 }
 
 backup() {
-  local f="$1"
-  if [[ -e "$f" || -L "$f" ]]; then run cp -pP "$f" "${f}.bak.${STAMP}"; fi
+  local f="$1" dest="${1}.bak.${STAMP}"
+  if [[ -e "$f" || -L "$f" ]]; then
+    # Never write through a pre-planted symlink (or any existing file) at the backup path.
+    if [[ -e "$dest" || -L "$dest" ]]; then echo "Refusing to overwrite existing backup path: $dest" >&2; exit 1; fi
+    run cp -pP "$f" "$dest"
+  fi
 }
 
 # --------------------------------------------------------------------------- doctor
