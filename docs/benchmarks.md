@@ -20,50 +20,38 @@ Google also reports that Carbon ranks #1 on CursorBench 4.0, Perplexity WANDR an
 
 Sources: [Introducing Gemini 4 Carbon](https://blog.google/innovation-and-ai/models-and-research/gemini-models/introducing-gemini-4-carbon/) (28 October 2026), [Gemini 4 Carbon is now available](https://blog.google/innovation-and-ai/models-and-research/gemini-models/gemini-4-carbon-now-available/) (10 November 2026).
 
-## Measured: the sidecar's commands on Carbon and on Argon
+## Measured: the sidecar's commands on four Gemini models
 
-We ran the same six tasks through the MCP server on both models, with identical inputs, on 11 November 2026. Carbon figures are the **median of three runs** with 2.4.4 (medium thinking, streamed). The previous model was run once.
+We ran the same six tasks through the MCP server on four Gemini models, with identical prompts and files, on 13 November 2026. Each model ran three times, and the figures are medians. Costs are at Vertex AI global list prices. Output tokens include thinking. Every model finished every task in one API request.
 
-| Task | `gemini-4-argon` (high thinking, 1 run) | `gemini-4-carbon` (median of 3) | Carbon's three runs |
-|---|---|---|---|
-| `/gemini:security-audit`, 3 files, 4,278 lines | 563 s, $0.97, 5 findings | 443 s, $0.93, 6 findings | 353 / 443 / 603 s |
-| `/gemini:review`, diff with 2 planted bugs | 41 s, $0.03, both caught | 100 s, $0.03, both caught in every run | 30 / 100 / 324 s |
-| `/gemini:analyze --deep`, 106 files, 259K tokens | 43 s, $1.07 | 79 s, $1.11 | 72 / 79 / 104 s |
-| `/gemini:spec-check`, RFC 6585 by URL | 119 s, $0.42 | 112 s, $0.34 | 35 / 112 / 148 s |
-| `/gemini:refactor`, a 2-file feature | 215 s, $0.39 | 308 s, $0.59 | 235 / 308 / 520 s |
-| `/gemini:map`, 2 directories | 121 s, $0.36 | 179 s, $0.35 | 103 / 179 / 196 s |
-| **Six tasks** | **18 min, $3.24** | **20 min, $3.33** | |
+| Model | Thinking | Six tasks | Cost | Input / output tokens | of which thinking | Audit caught the code-execution bug | Review caught both planted bugs |
+|---|---|---:|---:|---:|---:|---|---|
+| Gemini 4 Carbon | medium | 26.3 min | $3.42 | 436K / 84K | 63K | 3 of 3 | 3 of 3 |
+| Gemini 4 Argon | high | 19.5 min | $3.23 | 436K / 74K | 53K | 2 of 3 | 3 of 3 |
+| Gemini 3.8 Flash | medium | 8.1 min | $0.74 | 438K / 82K | 66K | 0 of 3 | 3 of 3 |
+| Gemini 3.5 Flash | medium | 2.5 min | $0.50 | 438K / 42K | 28K | 0 of 3 | 3 of 3 |
 
-Times are wall clock for the whole command. Costs are at Vertex AI global list prices ($4 / $0.20 / $20 per 1M tokens for both models). Google's introductory pricing halves them through 30 November 2026.
+Per task, median of three runs:
+
+| Task | Gemini 4 Carbon | Gemini 4 Argon | Gemini 3.8 Flash | Gemini 3.5 Flash |
+|---|---|---|---|---|
+| Security audit, 4,278 lines | 427 s, $0.88, 6 findings | 404 s, $0.92, 5 findings | 161 s, $0.26, 0 findings | 38 s, $0.13, 0 findings |
+| Review, 2 planted bugs | 135 s, $0.03 | 23 s, $0.03 | 19 s, $0.01 | 10 s, $0.02 |
+| Deep analysis, 106 files | 77 s, $1.11 | 56 s, $1.07 | 29 s, $0.07 | 16 s, $0.08 |
+| Spec check, RFC 6585 | 208 s, $0.36, 6 met / 5 partial | 121 s, $0.30, 7 met / 3 partial | 35 s, $0.05, 4 met / 1 partial | 24 s, $0.07, 7 met / 0 partial |
+| Refactor, 2-file feature | 429 s, $0.71 | 380 s, $0.51 | 204 s, $0.26 | 34 s, $0.14 |
+| Architecture map | 303 s, $0.32 | 186 s, $0.40 | 40 s, $0.08 | 29 s, $0.06 |
 
 ### What the numbers say
 
-- **Audits are faster and find more.** The median Carbon audit took 443 s, against 563 s for the previous model, and reported 6 findings to 5 (7 in one run).
-  - Every audit run found the same high-severity code-execution issue.
-  - The previous model's run also found a confirmed High issue: a `workspace_root` that steps into `.git`.
-  - A Carbon audit at high thinking found another confirmed High issue that no other run reported: a `.git` file that redirects reviews to another repository.
-  - We reproduced all three with proofs of concept, and all are fixed in 2.4.1. For security-critical code, set `GEMINI4_PRO_THINKING_LEVEL=high`, or audit with more than one model.
-- **Spec checks are faster and cheaper.** Median 112 s and $0.34. From 2.4.1 the server sends the page's text rather than its HTML, so the input is half as large.
-- **Carbon's latency varies a lot.** The same 1,200-token review took 30 s in one run and 324 s in another, with the same answer. Single runs mislead, which is why the Carbon column reports medians.
-- **Streaming removed the re-reads.** Carbon writes long answers in segments, and each segment re-reads the prompt. Before 2.4.4, a non-streamed segment held 32,768 output tokens and the refactor re-read its prompt several times (48,458 input tokens for 7,845 tokens of files). Streamed segments hold 65,536, so the same refactor now reads its prompt once. Measured before and after on the same task, cost fell from $0.95 to $0.59 and time from 624 s to 308 s.
-- **Thinking level matters.** At high thinking, Carbon took 232 s for the review and 21 minutes for the spec check. 2.4.3 and later use medium for every task; `GEMINI4_PRO_THINKING_LEVEL` changes it.
-
-### Tokens, requests and output speed
-
-| Task | Previous: input | Previous: output | Previous: requests | Previous: output tok/s | Carbon: input | Carbon: output | Carbon: requests | Carbon: output tok/s |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| Security audit, 4,278 lines | 81,730 | 32,237 | 1 | 57 | 81,730 | 33,185 | 1 | 77 |
-| Review, 2 planted bugs | 1,226 | 1,231 | 1 | 30 | 1,226 | 1,120 | 1 | 11 |
-| Deep analysis, 106 files | 258,868 | 1,940 | 1 | 45 | 258,868 | 3,649 | 1 | 48 |
-| Spec check, RFC 6585 | 62,920 | 8,272 | 1 | 70 | 33,358 | 10,236 | 1 | 91 |
-| Refactor, 2-file feature | 7,845 | 17,800 | 1 | 83 | 7,845 | 27,775 | 1 | 90 |
-| Architecture map | 53,363 | 7,442 | 1 | 62 | 53,363 | 6,633 | 1 | 34 |
-| **Six tasks** | **465,952** | **68,922** | **6** | | **436,390** | **82,598** | **6** | |
-
-- **Input** is the prompt the model was sent: files, diff or spec, plus the instructions. It is the same for both models except for the spec check. The previous model fetched the page itself, and from 2.4.1 the server sends only the page text, which is half the size.
-- **Output** includes thinking tokens, which are billed as output. Carbon wrote 20% more output in total, most of it on the refactor (27,775 tokens against 17,800).
-- **Requests** counts model API calls for one command. Each command is a single tool call from the agent. With streaming (2.4.4), Carbon finished every task in one request; before that, long answers needed continuation requests that each re-read the prompt.
-- **Output tok/s** is output tokens divided by wall time. Carbon figures are medians of three runs.
+- **Use a Pro model for audits.** The audited commit contains a confirmed high-severity code-execution bug: a git filter name containing `=`, fixed in 2.4.1.
+  - Carbon flagged it in all three runs and Argon in two.
+  - Both Flash models missed it every time, and reported no vulnerabilities at all.
+  - This is why `/gemini:security-audit` always runs on the Pro model.
+- **Flash is fast and cheap for questions and reviews.** All four models caught both planted bugs in every review run. 3.5 Flash finished all six tasks in 2.5 minutes for $0.50.
+- **Carbon thinks the most and takes the longest.** Across the six tasks it wrote 84K output tokens, 63K of them thinking, against Argon's 74K. Google notes Carbon uses more tokens than Argon by design. With streaming (2.4.4), every task needed only one request.
+- **Carbon's latency varies a lot.** One spec-check run took 1,376 s against a median of 208 s. The four models ran side by side for this comparison. On 11 November, when Carbon ran alone, its six-task median was 20 minutes rather than 26.
+- **Thinking level matters.** At high thinking, Carbon took 232 s for the review and 21 minutes for the spec check in an earlier run. Medium is the default from 2.4.3; `GEMINI4_PRO_THINKING_LEVEL` changes it.
 
 ### What broke on the old settings
 
@@ -78,9 +66,10 @@ Before 2.4.0, the plugin gave every model a 32K output budget and high thinking.
 - **Inputs.** The gemini-sidecar repository at commit `df3397f` (audit, spec check, map) and [google/santa-tracker-web](https://github.com/google/santa-tracker-web) at commit `7b7b0d17c` (review, deep analysis, refactor). The review applies a two-line patch that removes an origin check and changes a timeout from 10 s to 1 s.
 - **Same prompts.** Each task calls the MCP tool exactly as the slash command does. Only the model differs.
 - **One call at a time.** Runs were sequential on a GCE VM in `asia-south1`, against the Vertex AI `global` endpoint.
-- **Versions.** Previous model: plugin 2.3.8 settings. Carbon: 2.4.4 (medium thinking, streamed continuation).
-- **Repeats.** Carbon: three runs per task, median reported, with every run listed. One refactor run hit an expired Vertex access token during a long answer; 2.4.5 refreshes the token, and that run was repeated. The previous model: one run per task.
-- **Objective checks.** Findings are counted from the audit table; review checks whether each planted bug is named and whether the verdict blocks the change; spec checks count requirements by status. Audit findings were then verified by hand and with proofs of concept.
+- **Versions and settings.** Plugin 2.4.5. Carbon at medium thinking (the default), Argon at high (its default before 2.4.0), both Flash models at medium.
+- **Repeats.** Three runs per model per task; medians reported.
+- **Concurrency.** The four models ran in parallel, each on its own copy of the repositories; runs for one model were sequential.
+- **Objective checks.** Audits: whether the confirmed code-execution bug is flagged as High, plus the number of findings. Reviews: whether each planted bug is named and the verdict blocks the change. Spec checks: requirements by status. Findings were verified by hand and with proofs of concept.
 - **Since the runs.** From 2.4.1, the server fetches spec URLs itself rather than letting the model fetch them, so the spec-check input differs slightly from the measured run.
 
 The [CHANGELOG](../CHANGELOG.md) lists the security fixes that came out of these audits.

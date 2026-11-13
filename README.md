@@ -195,7 +195,7 @@ Flash rows were measured on 3–4 November 2026. Carbon rows are the median of t
 
 The triage row shows the log digest at work. Only 766 of the 30,006 lines were sent: every failure, traceback and `file:line`, plus the end of the log, with dropped ranges marked.
 
-**Benchmarks.** Carbon against the previous Pro model on the same six tasks, and Google's published Carbon results: [docs/benchmarks.md](./docs/benchmarks.md).
+**Benchmarks.** Four Gemini models (Carbon, Argon, 3.8 Flash, 3.5 Flash) on the same six tasks, and Google's published Carbon results: [docs/benchmarks.md](./docs/benchmarks.md).
 
 ## Codex CLI and Cursor
 
@@ -238,7 +238,7 @@ Sources: [Vertex AI pricing](https://cloud.google.com/vertex-ai/generative-ai/pr
 
 - [How the gateway works](./docs/gateway.md): run Claude Code's subagents, or the whole session, on Gemini.
 - [Reference](./docs/reference.md): all ten tools, configuration, the cost preview, the optional large-read guard, and troubleshooting.
-- [Benchmarks](./docs/benchmarks.md): Carbon against the previous Pro model on the same tasks, and Google's published Carbon results.
+- [Benchmarks](./docs/benchmarks.md): four Gemini models on the same tasks, and Google's published Carbon results.
 - [Contributing](./CONTRIBUTING.md), [Security policy](./SECURITY.md) and [Changelog](./CHANGELOG.md).
 
 Licensed under [Apache 2.0](./LICENSE).
